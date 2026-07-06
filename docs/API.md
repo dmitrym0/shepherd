@@ -36,6 +36,7 @@ omitted, not null.
   },
   "blocked_reason": "Claude wants to run: rm -rf node_modules",
   "cwd": "/Users/you/project",
+  "terminal": { "app": "iTerm2", "session_id": "1B0DF43A-DAA4-4C55-A299-4F0B6C3C1DAA" },
   "pid": 63477,
   "revision": 17,
   "status_since_ms": 1783377610632
@@ -55,6 +56,7 @@ omitted, not null.
 | `agent_session`   | object? | The agent's own resumable session ref (e.g. for `claude --resume`). |
 | `blocked_reason`  | string? | Why the agent is blocked. Only present when a hook reported it; screen-detected blocks carry no reason. |
 | `cwd`             | string? | Working directory the agent was started in. |
+| `terminal`        | object? | Terminal Location: which terminal the agent runs in — see below. |
 | `pid`             | number  | Wrapper process id. |
 | `revision`        | number  | Increments on every observable change to this object. |
 | `status_since_ms` | number  | Epoch ms of the last `agent_status` change — render "blocked for 12m" from this. |
@@ -70,6 +72,39 @@ omitted, not null.
 - **`idle`** — finished, and the user has been at the terminal since.
 - **`unknown`** — the wrapped command isn't a recognized agent, or its state
   can't be inferred.
+
+### Terminal Location
+
+`terminal` identifies the terminal the agent's wrapper runs in, captured from
+the wrapper's environment at registration and immutable for the agent's
+lifetime. Shepherd only publishes it — acting on it (revealing the tab) is
+yours to implement.
+
+| `app`    | `session_id`                       | Source |
+|----------|------------------------------------|--------|
+| `iTerm2` | the stable session UUID            | `ITERM_SESSION_ID` (positional `w0t4p0` prefix deliberately dropped — it goes stale on tab reorder; the UUID doesn't) |
+| `tmux`   | the pane id, e.g. `%5`             | `TMUX_PANE` (reported instead of iTerm2 when inside tmux, where the inherited iTerm id may describe where the tmux *server* started, not your attached tab) |
+
+Absent when the terminal isn't recognized. Example consumer — focus the
+agent's iTerm2 tab:
+
+```sh
+SID=$(curl -s localhost:4650/agents | jq -r '.[0].terminal.session_id')
+osascript -e "tell application \"iTerm2\"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if id of s is \"$SID\" then
+          select t
+          select s
+          activate
+          return
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell"
+```
 
 ## Polling: `GET /agents`
 

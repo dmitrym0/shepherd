@@ -58,6 +58,7 @@ impl Registry {
             entry_fields.agent,
             entry_fields.cwd,
             entry_fields.pid,
+            entry_fields.terminal,
         );
         let (info, _) = entry.snapshot();
         self.agents.insert(id, entry);

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::detect::{agent_label, parse_agent_label, Agent, AgentState};
 use crate::protocol::{
     now_epoch_ms, AgentInfo, AgentReportAgentParams, AgentReportMetadataParams,
-    AgentReportSessionParams, AgentSessionInfo, AgentStatus,
+    AgentReportSessionParams, AgentSessionInfo, AgentStatus, TerminalLocation,
 };
 
 const MAX_CUSTOM_STATUS_CHARS: usize = 32;
@@ -97,6 +97,7 @@ pub struct AgentEntry {
     pub name: Option<String>,
     pub cwd: String,
     pub pid: u32,
+    terminal: Option<TerminalLocation>,
     spawned_agent_label: Option<String>,
     detected_agent: Option<Agent>,
     fallback_state: AgentState,
@@ -122,6 +123,7 @@ impl AgentEntry {
         agent: Option<String>,
         cwd: String,
         pid: u32,
+        terminal: Option<TerminalLocation>,
     ) -> Self {
         let spawned_agent_label = agent
             .as_deref()
@@ -133,6 +135,7 @@ impl AgentEntry {
             name,
             cwd,
             pid,
+            terminal,
             detected_agent: spawned_agent_label.as_deref().and_then(parse_agent_label),
             spawned_agent_label,
             // A freshly registered agent was just launched by the user, who
@@ -551,6 +554,7 @@ impl AgentEntry {
             agent_session: self.effective_session(),
             blocked_reason: self.blocked_reason(),
             cwd: Some(self.cwd.clone()),
+            terminal: self.terminal.clone(),
             pid: self.pid,
             revision: self.revision,
             status_since_ms: self.status_since_ms,
@@ -612,6 +616,7 @@ mod tests {
             Some("claude".to_string()),
             "/tmp".to_string(),
             42,
+            None,
         )
     }
 

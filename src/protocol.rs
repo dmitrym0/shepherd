@@ -98,6 +98,16 @@ pub struct AgentRegisterParams {
     pub argv: Vec<String>,
     pub cwd: String,
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalLocation>,
+}
+
+/// Identity of the terminal a Wrapper runs in. Captured from the wrapper's
+/// environment at registration; immutable for the agent's lifetime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalLocation {
+    pub app: String,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +280,8 @@ pub struct AgentInfo {
     pub blocked_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalLocation>,
     pub pid: u32,
     pub revision: u64,
     /// Epoch milliseconds of the last agent_status change.

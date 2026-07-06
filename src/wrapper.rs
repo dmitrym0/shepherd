@@ -73,6 +73,7 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
             argv: argv.clone(),
             cwd,
             pid: std::process::id(),
+            terminal: detect_terminal_location(|var| std::env::var(var).ok()),
         }),
     };
     {
@@ -367,6 +368,30 @@ fn detection_loop(
     }
 }
 
+/// Terminal Location: which terminal this wrapper runs in, from env vars.
+/// Inside tmux the inherited ITERM_SESSION_ID may describe where the tmux
+/// *server* was born, not the attached tab — report the truthful innermost
+/// layer (the tmux pane) instead.
+fn detect_terminal_location(
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<crate::protocol::TerminalLocation> {
+    if env("TMUX").is_some() {
+        let pane = env("TMUX_PANE").filter(|pane| !pane.is_empty())?;
+        return Some(crate::protocol::TerminalLocation {
+            app: "tmux".to_string(),
+            session_id: pane,
+        });
+    }
+    let iterm = env("ITERM_SESSION_ID")?;
+    // Format: "w0t4p0:UUID" — keep only the stable UUID; the positional
+    // prefix is a spawn-time snapshot that goes stale on tab reorder.
+    let session_id = iterm.rsplit(':').next().filter(|id| !id.is_empty())?;
+    Some(crate::protocol::TerminalLocation {
+        app: "iTerm2".to_string(),
+        session_id: session_id.to_string(),
+    })
+}
+
 fn identify_agent_from_argv(argv: &[String]) -> Option<Agent> {
     let basename = argv[0]
         .rsplit(['/', '\\'])
@@ -462,5 +487,56 @@ impl Drop for RawModeGuard {
         if let Some(original) = &self.original {
             unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, original) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_terminal_location;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        move |var| {
+            pairs
+                .iter()
+                .find(|(name, _)| name == var)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[test]
+    fn iterm_session_id_yields_uuid_only() {
+        let location = detect_terminal_location(env(&[(
+            "ITERM_SESSION_ID",
+            "w0t4p0:1B0DF43A-DAA4-4C55-A299-4F0B6C3C1DAA",
+        )]))
+        .expect("iTerm2 should be detected");
+        assert_eq!(location.app, "iTerm2");
+        assert_eq!(location.session_id, "1B0DF43A-DAA4-4C55-A299-4F0B6C3C1DAA");
+    }
+
+    #[test]
+    fn tmux_wins_over_inherited_iterm_id() {
+        let location = detect_terminal_location(env(&[
+            ("TMUX", "/tmp/tmux-501/default,123,0"),
+            ("TMUX_PANE", "%5"),
+            ("ITERM_SESSION_ID", "w0t4p0:STALE"),
+        ]))
+        .expect("tmux should be detected");
+        assert_eq!(location.app, "tmux");
+        assert_eq!(location.session_id, "%5");
+    }
+
+    #[test]
+    fn unknown_terminal_yields_none() {
+        assert_eq!(detect_terminal_location(env(&[])), None);
+        // tmux without a pane id: omit rather than guess.
+        assert_eq!(
+            detect_terminal_location(env(&[("TMUX", "/tmp/tmux"), ("ITERM_SESSION_ID", "w0t0p0:X")])),
+            None
+        );
     }
 }

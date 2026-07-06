@@ -26,6 +26,8 @@
 
 **Agent Session** — a reference to the Agent's own resumable session (e.g. a Claude Code session id), self-reported via hooks. Carried as opaque metadata.
 
+**Terminal Location** — the identity of the terminal the Agent's Wrapper runs in (e.g. an iTerm2 session UUID). Captured by the Wrapper from its environment at registration; immutable for the Agent's lifetime. Identity, not presentation: distinct from State Labels, which integrations may overwrite. Shepherd only publishes it — acting on it (revealing the tab) is a consumer concern.
+
 **Detection** — inferring Agent State. Two pathways, also inherited from herdr:
 - **Screen detection** — pattern-matching rule manifests against the Agent's recent terminal output. The fallback; works for any agent.
 - **Hook authority** — the Agent self-reports state via installed hooks. Overrides screen detection when present.
