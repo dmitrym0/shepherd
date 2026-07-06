@@ -54,6 +54,12 @@ your terminal                             localhost
 - The server holds current state in memory only. Monitors get a snapshot on
   connect, then full-object deltas. Everything binds localhost.
 
+## Building a monitor
+
+Polling (`GET /agents`), streaming (`ws://localhost:4650/ws`), and the unix
+socket all serve the same JSON — see [docs/API.md](docs/API.md) for the agent
+object schema, status semantics, and the consumer contract.
+
 ## Configuration
 
 | Env var                | Default                     |
