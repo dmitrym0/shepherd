@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shepherd</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 2rem; background: #101418; color: #d8dee6;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  h1 { font-size: 1rem; letter-spacing: .2em; text-transform: uppercase; color: #7a869a; }
+  #conn { float: right; font-size: .8rem; color: #7a869a; }
+  .agent {
+    display: grid; grid-template-columns: 7.5rem 1fr auto; gap: .25rem 1rem;
+    align-items: baseline; padding: 1rem; margin: .75rem 0;
+    background: #171d24; border-radius: .5rem; border-left: .3rem solid #444;
+  }
+  .agent.working { border-left-color: #d9a03f; }
+  .agent.idle    { border-left-color: #4caf6e; }
+  .agent.blocked { border-left-color: #e05555; }
+  .agent.done    { border-left-color: #46b7c6; }
+  .agent.unknown { border-left-color: #555; }
+  .status { font-weight: 700; text-transform: uppercase; font-size: .85rem; }
+  .working .status { color: #d9a03f; }
+  .idle    .status { color: #4caf6e; }
+  .blocked .status { color: #e05555; }
+  .done    .status { color: #46b7c6; }
+  .unknown .status { color: #888; }
+  .name { font-weight: 600; }
+  .age { color: #7a869a; font-size: .85rem; }
+  .detail { grid-column: 2 / 4; color: #9aa7b5; font-size: .9rem; }
+  .reason { grid-column: 2 / 4; color: #e08585; font-size: .9rem; }
+  .cwd { grid-column: 2 / 4; color: #5f6b78; font-size: .8rem; }
+  #empty { color: #5f6b78; padding: 2rem 0; }
+</style>
+</head>
+<body>
+<h1>shepherd <span id="conn">connecting…</span></h1>
+<div id="agents"></div>
+<div id="empty" hidden>no supervised agents</div>
+<script>
+"use strict";
+const agents = new Map();
+let connected = false;
+
+function render() {
+  const root = document.getElementById("agents");
+  root.textContent = "";
+  const sorted = [...agents.values()].sort((a, b) => a.agent_id.localeCompare(b.agent_id));
+  document.getElementById("empty").hidden = sorted.length > 0;
+  for (const info of sorted) {
+    const card = document.createElement("div");
+    card.className = "agent " + info.agent_status;
+
+    const status = document.createElement("span");
+    status.className = "status";
+    status.textContent = info.agent_status;
+    card.appendChild(status);
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = info.name || info.title || info.display_agent || info.agent || "agent";
+    card.appendChild(name);
+
+    const age = document.createElement("span");
+    age.className = "age";
+    age.dataset.since = info.status_since_ms;
+    age.textContent = humanize(Date.now() - info.status_since_ms);
+    card.appendChild(age);
+
+    const labels = Object.entries(info.state_labels || {}).map(([k, v]) => k + ": " + v);
+    const detailText = [info.custom_status, ...labels].filter(Boolean).join(" · ");
+    if (detailText) {
+      const detail = document.createElement("div");
+      detail.className = "detail";
+      detail.textContent = detailText;
+      card.appendChild(detail);
+    }
+    if (info.blocked_reason) {
+      const reason = document.createElement("div");
+      reason.className = "reason";
+      reason.textContent = info.blocked_reason;
+      card.appendChild(reason);
+    }
+    if (info.cwd) {
+      const cwd = document.createElement("div");
+      cwd.className = "cwd";
+      cwd.textContent = (info.agent ? info.agent + " · " : "") + info.cwd;
+      card.appendChild(cwd);
+    }
+    root.appendChild(card);
+  }
+}
+
+function humanize(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  return Math.floor(s / 3600) + "h" + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+}
+
+setInterval(() => {
+  for (const age of document.querySelectorAll(".age")) {
+    age.textContent = humanize(Date.now() - Number(age.dataset.since));
+  }
+}, 1000);
+
+function connect() {
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onopen = () => {
+    connected = true;
+    document.getElementById("conn").textContent = "live";
+  };
+  ws.onmessage = (message) => {
+    const { event, data } = JSON.parse(message.data);
+    if (event === "snapshot") {
+      agents.clear();
+      for (const info of data.agents) agents.set(info.agent_id, info);
+    } else if (event === "agent_removed") {
+      agents.delete(data.agent_id);
+    } else if (event === "agent_added" || event === "agent_updated") {
+      agents.set(data.agent_id, data);
+    }
+    render();
+  };
+  ws.onclose = () => {
+    connected = false;
+    document.getElementById("conn").textContent = "reconnecting…";
+    setTimeout(connect, 1000);
+  };
+}
+connect();
+render();
+</script>
+</body>
+</html>
