@@ -385,6 +385,14 @@ impl AgentEntry {
         self.seen = true;
     }
 
+    /// Latest write wins: --name seeds it, agent renames overwrite it.
+    pub fn set_name(&mut self, name: &str) {
+        let name = name.trim();
+        if !name.is_empty() {
+            self.name = Some(name.to_string());
+        }
+    }
+
     // -- arbitration ---------------------------------------------------------
 
     fn recompute_effective_state(&mut self) {

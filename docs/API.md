@@ -46,7 +46,7 @@ omitted, not null.
 | Field             | Type    | Meaning |
 |-------------------|---------|---------|
 | `agent_id`        | string  | Stable for the agent's lifetime; unique per server run. |
-| `name`            | string? | From `shepherd run --name`. |
+| `name`            | string? | Display name. Seeded by `shepherd run --name`; agents can overwrite it (Claude Code's `/rename` propagates here). Latest write wins. |
 | `agent`           | string? | Canonical agent label (`claude`, `codex`, …); absent if unrecognized. |
 | `display_agent`   | string? | Prettier agent name, hook-reported. |
 | `title`           | string? | Free-text title, hook-reported. |

@@ -26,6 +26,8 @@
 
 **Agent Session** — a reference to the Agent's own resumable session (e.g. a Claude Code session id), self-reported via hooks. Carried as opaque metadata.
 
+**Name** — the Agent's display name. Seeded at launch by the user (`shepherd run --name`), but *agent-updatable*: an agent renaming its own session (e.g. Claude Code's `/rename`) overwrites it. Latest write wins, whoever wrote it. Distinct from Title, which is presentation metadata reported by integrations and never overrides Name.
+
 **Terminal Location** — the identity of the terminal the Agent's Wrapper runs in (e.g. an iTerm2 session UUID). Captured by the Wrapper from its environment at registration; immutable for the Agent's lifetime. Identity, not presentation: distinct from State Labels, which integrations may overwrite. Shepherd only publishes it — acting on it (revealing the tab) is a consumer concern.
 
 **Detection** — inferring Agent State. Two pathways, also inherited from herdr:

@@ -160,6 +160,15 @@ fn register_report_list_and_removal_on_disconnect() {
     let agents = list_agents(&server.socket);
     assert_eq!(agents[0]["agent_session"]["value"], "sess-9");
 
+    // Rename (e.g. propagated from Claude's /rename) overwrites the name.
+    send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({"id": 6, "method": "agent.rename", "params": {"agent_id": agent_id, "name": "renamed"}}),
+    );
+    let agents = list_agents(&server.socket);
+    assert_eq!(agents[0]["name"], "renamed");
+
     // Dropping the registering connection removes the agent.
     drop(stream);
     drop(reader);

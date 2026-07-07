@@ -55,6 +55,10 @@ pub enum Method {
     /// Wrapper reports local user input (Seen evidence).
     #[serde(rename = "agent.seen")]
     AgentSeen(AgentTarget),
+    /// Update an agent's display name (e.g. propagated from Claude Code's
+    /// /rename). Latest write wins. Mirrors herdr's agent.rename.
+    #[serde(rename = "agent.rename")]
+    AgentRename(AgentRenameParams),
     /// Hook reports agent state (hook authority). Mirrors herdr's
     /// pane.report_agent.
     #[serde(rename = "agent.report_agent")]
@@ -86,6 +90,12 @@ pub struct EmptyParams {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTarget {
     pub agent_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRenameParams {
+    pub agent_id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

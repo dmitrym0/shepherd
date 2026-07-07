@@ -300,6 +300,12 @@ fn handle_request(
                 .update_agent(&params.agent_id, |entry| entry.mark_seen())?;
             Ok(serde_json::json!({}))
         }
+        Method::AgentRename(params) => {
+            shared
+                .lock()
+                .update_agent(&params.agent_id, |entry| entry.set_name(&params.name))?;
+            Ok(serde_json::json!({}))
+        }
         Method::AgentReportAgent(params) => {
             let agent_id = params.agent_id.clone();
             shared.lock().update_agent(&agent_id, |entry| {

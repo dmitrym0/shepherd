@@ -22,6 +22,7 @@ use crate::supervise::{
 };
 
 const SEEN_REPORT_THROTTLE: Duration = Duration::from_secs(2);
+const CLAUDE_SESSION_POLL: Duration = Duration::from_secs(2);
 const VT_SCROLLBACK_LINES: usize = 500;
 
 /// Terminal emulation state fed by the PTY reader, read by the detection loop.
@@ -224,6 +225,19 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
         });
     }
 
+    // Claude /rename propagation: poll Claude's session metadata file and
+    // push name changes as agent.rename.
+    if agent == Some(Agent::Claude) {
+        if let Some(child_pid) = child.process_id() {
+            let client = client.clone();
+            let agent_id = agent_id.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                poll_claude_session_name(child_pid, &agent_id, &client, &stop);
+            });
+        }
+    }
+
     // Detection loop.
     {
         let emulation = emulation.clone();
@@ -366,6 +380,63 @@ fn detection_loop(
             ));
         }
     }
+}
+
+/// Watches `~/.claude/sessions/<pid>.json` for the `name` field that
+/// Claude Code's /rename writes, and propagates changes as agent.rename.
+/// The file is keyed by Claude's own pid — ours, since the wrapper spawns
+/// claude directly. ponytail: if claude sits behind a shim (pid mismatch)
+/// the file never appears and this silently does nothing; match by
+/// sessionId if that ever matters.
+fn poll_claude_session_name(
+    child_pid: u32,
+    agent_id: &str,
+    client: &IngestClient,
+    stop: &AtomicBool,
+) {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let path = std::path::Path::new(&home)
+        .join(".claude")
+        .join("sessions")
+        .join(format!("{child_pid}.json"));
+    let mut last_mtime: Option<std::time::SystemTime> = None;
+    let mut last_name: Option<String> = None;
+    loop {
+        std::thread::sleep(CLAUDE_SESSION_POLL);
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let mtime = metadata.modified().ok();
+        if mtime == last_mtime {
+            continue;
+        }
+        last_mtime = mtime;
+        let Some(name) = claude_session_name(&path) else {
+            continue;
+        };
+        if last_name.as_deref() == Some(name.as_str()) {
+            continue;
+        }
+        last_name = Some(name.clone());
+        client.notify(Method::AgentRename(crate::protocol::AgentRenameParams {
+            agent_id: agent_id.to_string(),
+            name,
+        }));
+    }
+}
+
+/// Reads the `name` field (set by /rename) from Claude Code's session
+/// metadata file. Undocumented internal format — fail silent on any change.
+fn claude_session_name(path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let name = json.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// Terminal Location: which terminal this wrapper runs in, from env vars.
@@ -528,6 +599,32 @@ mod tests {
         .expect("tmux should be detected");
         assert_eq!(location.app, "tmux");
         assert_eq!(location.session_id, "%5");
+    }
+
+    #[test]
+    fn claude_session_name_reads_rename_field() {
+        let dir = std::env::temp_dir().join(format!("shep-claude-name-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        let path = dir.join("123.json");
+
+        std::fs::write(&path, r#"{"pid":123,"sessionId":"s","status":"idle"}"#)
+            .expect("file should write");
+        assert_eq!(super::claude_session_name(&path), None);
+
+        std::fs::write(
+            &path,
+            r#"{"pid":123,"sessionId":"s","name":"fix auth bug","status":"idle"}"#,
+        )
+        .expect("file should write");
+        assert_eq!(
+            super::claude_session_name(&path).as_deref(),
+            Some("fix auth bug")
+        );
+
+        std::fs::write(&path, "not json").expect("file should write");
+        assert_eq!(super::claude_session_name(&path), None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
