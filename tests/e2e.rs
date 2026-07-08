@@ -27,7 +27,7 @@ fn start_server(tag: &str) -> ServerHandle {
     static PORT_OFFSET: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     let offset = PORT_OFFSET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let port = 20000 + (std::process::id() % 10000) as u16 + offset;
-    let child = Command::new(env!("CARGO_BIN_EXE_shepherd"))
+    let child = Command::new(env!("CARGO_BIN_EXE_shep"))
         .arg("serve")
         .env("SHEPHERD_SOCKET_PATH", &socket)
         .env("SHEPHERD_HTTP_PORT", port.to_string())
@@ -227,7 +227,7 @@ fn events_subscribe_streams_snapshot_and_updates() {
 fn wrapper_runs_a_command_and_registers_it() {
     let server = start_server("wrapper");
 
-    let mut wrapper = Command::new(env!("CARGO_BIN_EXE_shepherd"))
+    let mut wrapper = Command::new(env!("CARGO_BIN_EXE_shep"))
         .args(["run", "--name", "smoke", "--", "sh", "-c", "sleep 2"])
         .env("SHEPHERD_SOCKET_PATH", &server.socket)
         .stdin(Stdio::null())

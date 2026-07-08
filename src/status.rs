@@ -30,7 +30,7 @@ fn connect() -> std::io::Result<UnixStream> {
     let path = socket_path();
     UnixStream::connect(&path).map_err(|err| {
         std::io::Error::other(format!(
-            "no shepherd server at {} ({err}); start an agent with `shepherd run` or run `shepherd serve`",
+            "no shep server at {} ({err}); start an agent with `shep run` or run `shep serve`",
             path.display()
         ))
     })
@@ -260,7 +260,7 @@ pub fn claude_hook(action: &str) -> std::io::Result<()> {
 }
 
 /// Merge a SessionStart hook entry into ~/.claude/settings.json. Idempotent:
-/// removes any previous shepherd claude-hook entries first.
+/// removes any previous shep claude-hook entries first.
 pub fn install_claude_hook() -> std::io::Result<PathBuf> {
     let home = std::env::var("HOME")
         .map_err(|_| std::io::Error::other("HOME is not set"))?;

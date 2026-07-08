@@ -46,7 +46,7 @@ omitted, not null.
 | Field             | Type    | Meaning |
 |-------------------|---------|---------|
 | `agent_id`        | string  | Stable for the agent's lifetime; unique per server run. |
-| `name`            | string? | Display name. Seeded by `shepherd run --name`; agents can overwrite it (Claude Code's `/rename` propagates here). Latest write wins. |
+| `name`            | string? | Display name. Seeded by `shep run --name`; agents can overwrite it (Claude Code's `/rename` propagates here). Latest write wins. |
 | `agent`           | string? | Canonical agent label (`claude`, `codex`, …); absent if unrecognized. |
 | `display_agent`   | string? | Prettier agent name, hook-reported. |
 | `title`           | string? | Free-text title, hook-reported. |
@@ -165,7 +165,7 @@ printf '{"id":1,"method":"agent.list","params":{}}\n' \
 
 Stream: send `{"id":1,"method":"events.subscribe","params":{}}`; after the
 response, the connection becomes an event stream — the same event objects as
-the WebSocket, one per line, starting with a snapshot. (`shepherd status
+the WebSocket, one per line, starting with a snapshot. (`shep status
 --watch` is exactly this.)
 
 The socket also accepts the write side (registration, state and metadata

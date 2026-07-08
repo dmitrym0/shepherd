@@ -73,7 +73,7 @@ pub enum Method {
     /// Hook clears its authority. Mirrors herdr's pane.clear_agent_authority.
     #[serde(rename = "agent.clear_authority")]
     AgentClearAuthority(AgentClearAuthorityParams),
-    /// Snapshot of all agents (local clients, e.g. `shepherd status`).
+    /// Snapshot of all agents (local clients, e.g. `shep status`).
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
     /// Switch this connection into an event stream: snapshot event first,

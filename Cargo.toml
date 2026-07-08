@@ -5,6 +5,10 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "Terminal-independent AI agent supervision: run agents in your terminal, monitor their status anywhere"
 
+[[bin]]
+name = "shep"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

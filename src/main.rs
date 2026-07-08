@@ -10,7 +10,7 @@ mod wrapper;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "shepherd", version, about = "Run AI agents in your terminal; monitor their status anywhere")]
+#[command(name = "shep", version, about = "Run AI agents in your terminal; monitor their status anywhere")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -27,7 +27,7 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
-    /// Run the aggregation server in the foreground. `shepherd run`
+    /// Run the aggregation server in the foreground. `shep run`
     /// auto-starts one when none is running.
     Serve,
     /// Show supervised agents.

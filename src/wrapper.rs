@@ -1,4 +1,4 @@
-//! The `shepherd run` wrapper: a transparent PTY shim. Spawns the agent under
+//! The `shep run` wrapper: a transparent PTY shim. Spawns the agent under
 //! a PTY in the user's terminal, passes bytes through untouched, runs screen
 //! detection on the output stream, and reports state to the server over the
 //! ingest socket. The agent lives and dies with this process.
@@ -501,7 +501,7 @@ fn connect_or_start_server() -> std::io::Result<UnixStream> {
             Ok(stream) => return Ok(stream),
             Err(err) if Instant::now() >= deadline => {
                 return Err(std::io::Error::other(format!(
-                    "could not reach shepherd server at {} after starting it: {err}",
+                    "could not reach shep server at {} after starting it: {err}",
                     path.display()
                 )));
             }
