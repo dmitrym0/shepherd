@@ -4,6 +4,7 @@ mod protocol;
 mod server;
 mod state;
 mod status;
+mod store;
 mod supervise;
 mod wrapper;
 
@@ -32,9 +33,19 @@ enum Command {
     Serve,
     /// Show supervised agents.
     Status {
+        /// Filter by metadata: `key=value` (exact key) or a bare term
+        /// (substring over all keys and values).
+        filter: Option<String>,
         /// Keep watching; re-render on every change.
         #[arg(long, short)]
         watch: bool,
+    },
+    /// Set session metadata: `shep meta [agent] key=value...`. An empty
+    /// value (`key=`) removes the key; no entries prints current metadata.
+    /// Without an agent, targets the supervised session this command runs in.
+    Meta {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Install the Claude Code SessionStart hook so Claude sessions report
     /// their resumable session id.
@@ -65,7 +76,14 @@ fn main() {
                 }
             }
         }
-        Command::Status { watch } => match status::status(watch) {
+        Command::Status { filter, watch } => match status::status(watch, filter) {
+            Ok(()) => 0,
+            Err(err) => {
+                eprintln!("shepherd: {err}");
+                1
+            }
+        },
+        Command::Meta { args } => match status::meta(args) {
             Ok(()) => 0,
             Err(err) => {
                 eprintln!("shepherd: {err}");
@@ -75,6 +93,7 @@ fn main() {
         Command::InstallClaudeHook => match status::install_claude_hook() {
             Ok(path) => {
                 println!("installed SessionStart hook into {}", path.display());
+                println!("installed shep-meta skill into ~/.claude/skills/shep-meta/");
                 0
             }
             Err(err) => {

@@ -31,26 +31,80 @@
   .name { font-weight: 600; }
   .age { color: #7a869a; font-size: .85rem; }
   .detail { grid-column: 2 / 4; color: #9aa7b5; font-size: .9rem; }
+  .description { grid-column: 2 / 4; color: #c7d1dc; font-size: .95rem; }
+  .meta { grid-column: 2 / 4; color: #7a869a; font-size: .8rem; }
+  .meta a { color: #6fa8dc; text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+  #filter {
+    width: 100%; box-sizing: border-box; margin: .25rem 0 0; padding: .5rem .75rem;
+    background: #171d24; color: #d8dee6; border: 1px solid #2a323c;
+    border-radius: .5rem; font: inherit;
+  }
   .reason { grid-column: 2 / 4; color: #e08585; font-size: .9rem; }
   .cwd { grid-column: 2 / 4; color: #5f6b78; font-size: .8rem; }
   #empty { color: #5f6b78; padding: 2rem 0; }
+  .dir {
+    font-size: .8rem; font-weight: 600; color: #7a869a;
+    margin: 1.5rem 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 </style>
 </head>
 <body>
 <h1>shepherd <span id="conn">connecting…</span></h1>
+<input id="filter" type="search" placeholder="filter: term or key=value" autocomplete="off">
 <div id="agents"></div>
 <div id="empty" hidden>no supervised agents</div>
 <script>
 "use strict";
 const agents = new Map();
 let connected = false;
+let jiraBase = null;
+
+fetch("/config")
+  .then((response) => response.json())
+  .then((config) => { jiraBase = config.jira_base_url || null; render(); })
+  .catch(() => {});
+
+document.getElementById("filter").addEventListener("input", render);
+
+function matchesFilter(info, filter) {
+  const meta = info.metadata || {};
+  const eq = filter.indexOf("=");
+  if (eq > 0) {
+    const key = filter.slice(0, eq);
+    const value = filter.slice(eq + 1);
+    return (meta[key] || "").toLowerCase() === value.toLowerCase();
+  }
+  const needle = filter.toLowerCase();
+  return Object.entries(meta).some(
+    ([key, value]) => key.toLowerCase().includes(needle) || value.toLowerCase().includes(needle),
+  );
+}
 
 function render() {
   const root = document.getElementById("agents");
   root.textContent = "";
   const sorted = [...agents.values()].sort((a, b) => a.agent_id.localeCompare(b.agent_id));
-  document.getElementById("empty").hidden = sorted.length > 0;
-  for (const info of sorted) {
+  const filter = document.getElementById("filter").value.trim();
+  const visible = filter ? sorted.filter((info) => matchesFilter(info, filter)) : sorted;
+  const empty = document.getElementById("empty");
+  empty.hidden = visible.length > 0;
+  empty.textContent =
+    filter && sorted.length ? 'no sessions match "' + filter + '"' : "no supervised agents";
+  const groups = new Map();
+  for (const info of visible) {
+    const key = info.cwd || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(info);
+  }
+  const dirs = [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
+  for (const dir of dirs) {
+    const heading = document.createElement("h2");
+    heading.className = "dir";
+    heading.textContent = dir ? dir.replace(/^\/(?:Users|home)\/[^/]+/, "~") : "unknown";
+    if (dir) heading.title = dir;
+    root.appendChild(heading);
+    for (const info of groups.get(dir)) {
     const card = document.createElement("div");
     card.className = "agent " + info.agent_status;
 
@@ -69,6 +123,36 @@ function render() {
     age.dataset.since = info.status_since_ms;
     age.textContent = humanize(Date.now() - info.status_since_ms);
     card.appendChild(age);
+
+    const meta = info.metadata || {};
+    if (meta.description) {
+      const description = document.createElement("div");
+      description.className = "description";
+      description.textContent = meta.description;
+      card.appendChild(description);
+    }
+    const chips = document.createElement("div");
+    chips.className = "meta";
+    const pairs = Object.entries(meta)
+      .filter(([key]) => key !== "description")
+      .sort((a, b) => a[0].localeCompare(b[0]));
+    for (const [key, value] of pairs) {
+      if (chips.childNodes.length) chips.appendChild(document.createTextNode(" · "));
+      let href = null;
+      if (key === "jira" && jiraBase) href = jiraBase.replace(/\/+$/, "") + "/browse/" + value;
+      if (key === "url") href = value;
+      if (href) {
+        const link = document.createElement("a");
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        link.textContent = key + ": " + value;
+        chips.appendChild(link);
+      } else {
+        chips.appendChild(document.createTextNode(key + ": " + value));
+      }
+    }
+    if (chips.childNodes.length) card.appendChild(chips);
 
     const labels = Object.entries(info.state_labels || {}).map(([k, v]) => k + ": " + v);
     const detailText = [info.custom_status, ...labels].filter(Boolean).join(" · ");
@@ -90,7 +174,8 @@ function render() {
       cwd.textContent = (info.agent ? info.agent + " · " : "") + info.cwd;
       card.appendChild(cwd);
     }
-    root.appendChild(card);
+      root.appendChild(card);
+    }
   }
 }
 

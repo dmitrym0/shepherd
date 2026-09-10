@@ -1,14 +1,14 @@
 //! Local clients of the ingest socket: the `status` command, the Claude Code
 //! hook entry point, and its installer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use crate::protocol::{
-    now_epoch_ms, socket_path, AgentInfo, AgentStatus, Event, Method, Request, Response,
-    EVENT_AGENT_REMOVED, EVENT_SNAPSHOT,
+    now_epoch_ms, socket_path, AgentInfo, AgentSetMetadataParams, AgentStatus, Event, Method,
+    Request, Response, EVENT_AGENT_REMOVED, EVENT_SNAPSHOT,
 };
 
 fn request(stream: &mut UnixStream, method: Method) -> std::io::Result<Response> {
@@ -36,19 +36,56 @@ fn connect() -> std::io::Result<UnixStream> {
     })
 }
 
-pub fn status(watch: bool) -> std::io::Result<()> {
+fn fetch_agents(stream: &mut UnixStream) -> std::io::Result<Vec<AgentInfo>> {
+    let response = request(stream, Method::AgentList(Default::default()))?;
+    if let Some(error) = response.error {
+        return Err(std::io::Error::other(error.message));
+    }
+    Ok(response
+        .result
+        .and_then(|result| result.get("agents").cloned())
+        .map(|value| serde_json::from_value(value).unwrap_or_default())
+        .unwrap_or_default())
+}
+
+/// `key=value` matches an exact key with that value (case-insensitive);
+/// a bare term substring-matches any metadata key or value.
+fn matches_filter(info: &AgentInfo, filter: &str) -> bool {
+    if let Some((key, value)) = filter.split_once('=') {
+        info.metadata
+            .get(key)
+            .is_some_and(|found| found.eq_ignore_ascii_case(value))
+    } else {
+        let needle = filter.to_lowercase();
+        info.metadata.iter().any(|(key, value)| {
+            key.to_lowercase().contains(&needle) || value.to_lowercase().contains(&needle)
+        })
+    }
+}
+
+fn render_filtered<'a>(
+    agents: impl Iterator<Item = &'a AgentInfo>,
+    filter: Option<&str>,
+) -> String {
+    match filter {
+        None => render_table(agents),
+        Some(filter) => {
+            let matching: Vec<&AgentInfo> =
+                agents.filter(|info| matches_filter(info, filter)).collect();
+            if matching.is_empty() {
+                format!("no sessions match {filter:?}\n")
+            } else {
+                render_table(matching.into_iter())
+            }
+        }
+    }
+}
+
+pub fn status(watch: bool, filter: Option<String>) -> std::io::Result<()> {
     let mut stream = connect()?;
     if !watch {
-        let response = request(&mut stream, Method::AgentList(Default::default()))?;
-        if let Some(error) = response.error {
-            return Err(std::io::Error::other(error.message));
-        }
-        let agents: Vec<AgentInfo> = response
-            .result
-            .and_then(|result| result.get("agents").cloned())
-            .map(|value| serde_json::from_value(value).unwrap_or_default())
-            .unwrap_or_default();
-        print!("{}", render_table(agents.iter()));
+        let agents = fetch_agents(&mut stream)?;
+        print!("{}", render_filtered(agents.iter(), filter.as_deref()));
         return Ok(());
     }
 
@@ -86,14 +123,145 @@ pub fn status(watch: bool) -> std::io::Result<()> {
             }
         }
         // Clear screen, home cursor, re-render.
-        print!("\x1b[2J\x1b[H{}", render_table(agents.values()));
+        print!(
+            "\x1b[2J\x1b[H{}",
+            render_filtered(agents.values(), filter.as_deref())
+        );
         std::io::stdout().flush()?;
     }
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// shep meta
+// ---------------------------------------------------------------------------
+
+/// Split `shep meta` args: entries carry `=`, an optional leading bare arg
+/// selects the agent.
+fn parse_meta_args(
+    args: &[String],
+) -> Result<(Option<String>, HashMap<String, String>), String> {
+    let mut selector = None;
+    let mut entries = HashMap::new();
+    for (index, arg) in args.iter().enumerate() {
+        match arg.split_once('=') {
+            Some((key, value)) => {
+                if key.trim().is_empty() {
+                    return Err(format!("empty key in {arg:?}; usage: shep meta [agent] key=value..."));
+                }
+                entries.insert(key.to_string(), value.to_string());
+            }
+            None => {
+                if index != 0 {
+                    return Err(format!(
+                        "agent selector must come first: {arg:?}; usage: shep meta [agent] key=value..."
+                    ));
+                }
+                selector = Some(arg.clone());
+            }
+        }
+    }
+    Ok((selector, entries))
+}
+
+fn describe_agents(agents: &[AgentInfo]) -> String {
+    if agents.is_empty() {
+        return "no supervised agents are running".to_string();
+    }
+    let mut out = String::from("running agents:");
+    for info in agents {
+        let name = info
+            .name
+            .clone()
+            .or_else(|| info.title.clone())
+            .unwrap_or_default();
+        out.push_str(&format!("\n  {}  {name}", info.agent_id));
+    }
+    out
+}
+
+fn resolve_target<'a>(
+    selector: Option<&str>,
+    agents: &'a [AgentInfo],
+) -> Result<&'a AgentInfo, String> {
+    match selector {
+        Some(selector) => agents
+            .iter()
+            .find(|info| {
+                info.agent_id == selector || info.name.as_deref() == Some(selector)
+            })
+            .ok_or_else(|| format!("no agent matches {selector:?}; {}", describe_agents(agents))),
+        None => {
+            let agent_id = std::env::var("SHEPHERD_AGENT_ID").map_err(|_| {
+                format!(
+                    "no agent specified and not inside a supervised session; {}",
+                    describe_agents(agents)
+                )
+            })?;
+            agents
+                .iter()
+                .find(|info| info.agent_id == agent_id)
+                .ok_or_else(|| {
+                    format!("supervised session {agent_id} not found; {}", describe_agents(agents))
+                })
+        }
+    }
+}
+
+pub fn meta(args: Vec<String>) -> std::io::Result<()> {
+    let (selector, entries) = parse_meta_args(&args).map_err(std::io::Error::other)?;
+    let mut stream = connect()?;
+    let agents = fetch_agents(&mut stream)?;
+    let target = resolve_target(selector.as_deref(), &agents).map_err(std::io::Error::other)?;
+    if entries.is_empty() {
+        let mut pairs: Vec<_> = target.metadata.iter().collect();
+        pairs.sort();
+        for (key, value) in pairs {
+            println!("{key}={value}");
+        }
+        return Ok(());
+    }
+    let response = request(
+        &mut stream,
+        Method::AgentSetMetadata(AgentSetMetadataParams {
+            agent_id: target.agent_id.clone(),
+            entries,
+        }),
+    )?;
+    if let Some(error) = response.error {
+        return Err(std::io::Error::other(error.message));
+    }
+    Ok(())
+}
+
+/// `description` first, then remaining pairs as `k=v`, everything truncated.
+fn meta_cell(info: &AgentInfo) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(description) = info.metadata.get("description") {
+        parts.push(truncate(description, 40));
+    }
+    let mut pairs: Vec<_> = info
+        .metadata
+        .iter()
+        .filter(|(key, _)| *key != "description")
+        .collect();
+    pairs.sort();
+    for (key, value) in pairs {
+        parts.push(format!("{key}={}", truncate(value, 20)));
+    }
+    parts.join(" ")
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
 fn render_table<'a>(agents: impl Iterator<Item = &'a AgentInfo>) -> String {
-    let mut rows: Vec<[String; 6]> = Vec::new();
+    let mut rows: Vec<[String; 7]> = Vec::new();
     for info in agents {
         let status = info.agent_status;
         let name = info
@@ -121,6 +289,7 @@ fn render_table<'a>(agents: impl Iterator<Item = &'a AgentInfo>) -> String {
             name,
             humanize_age(now_epoch_ms().saturating_sub(info.status_since_ms)),
             info.cwd.clone().unwrap_or_default(),
+            meta_cell(info),
             note,
         ]);
     }
@@ -128,7 +297,7 @@ fn render_table<'a>(agents: impl Iterator<Item = &'a AgentInfo>) -> String {
         return "no supervised agents\n".to_string();
     }
     let mut out = String::new();
-    let header = ["STATUS", "AGENT", "NAME", "FOR", "CWD", "NOTE"];
+    let header = ["STATUS", "AGENT", "NAME", "FOR", "CWD", "META", "NOTE"];
     // Column widths ignore ANSI escapes; the status column is padded by its
     // visible label instead.
     let mut widths = header.map(str::len);
@@ -259,6 +428,98 @@ pub fn claude_hook(action: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info_with_metadata(pairs: &[(&str, &str)]) -> AgentInfo {
+        AgentInfo {
+            agent_id: "agent_1".to_string(),
+            name: Some("refactor-bot".to_string()),
+            agent: None,
+            display_agent: None,
+            title: None,
+            agent_status: AgentStatus::Idle,
+            custom_status: None,
+            state_labels: HashMap::new(),
+            metadata: pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            agent_session: None,
+            blocked_reason: None,
+            cwd: None,
+            terminal: None,
+            pid: 1,
+            revision: 0,
+            status_since_ms: 0,
+        }
+    }
+
+    #[test]
+    fn meta_args_split_selector_and_entries() {
+        let (selector, entries) = parse_meta_args(&[
+            "bot".to_string(),
+            "jira=PROJ-1".to_string(),
+            "gone=".to_string(),
+        ])
+        .expect("args should parse");
+        assert_eq!(selector.as_deref(), Some("bot"));
+        assert_eq!(entries.get("jira").map(String::as_str), Some("PROJ-1"));
+        assert_eq!(entries.get("gone").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn meta_args_reject_late_selector_and_empty_key() {
+        assert!(parse_meta_args(&["jira=1".to_string(), "bot".to_string()]).is_err());
+        assert!(parse_meta_args(&["=oops".to_string()]).is_err());
+    }
+
+    #[test]
+    fn filter_matches_pairs_and_bare_terms() {
+        let info = info_with_metadata(&[("jira", "PROJ-123"), ("env", "staging")]);
+        assert!(matches_filter(&info, "jira=proj-123"));
+        assert!(!matches_filter(&info, "jira=PROJ-999"));
+        assert!(matches_filter(&info, "stag"));
+        assert!(matches_filter(&info, "PROJ"));
+        assert!(!matches_filter(&info, "nope"));
+    }
+
+    #[test]
+    fn filtered_render_reports_empty_matches() {
+        let info = info_with_metadata(&[("jira", "PROJ-123")]);
+        let rendered = render_filtered([&info].into_iter().cloned().collect::<Vec<_>>().iter(), Some("nope"));
+        assert_eq!(rendered, "no sessions match \"nope\"\n");
+    }
+
+    #[test]
+    fn meta_cell_puts_description_first() {
+        let info = info_with_metadata(&[("jira", "PROJ-1"), ("description", "fix login")]);
+        assert_eq!(meta_cell(&info), "fix login jira=PROJ-1");
+    }
+}
+
+/// Instructions installed as a Claude Code skill so a supervised Claude can
+/// tag its own session; the wrapper-injected SHEPHERD_AGENT_ID targets it.
+const SHEP_META_SKILL: &str = r#"---
+name: shep-meta
+description: Tag the current shepherd-supervised session with metadata. Use when the user asks to tag, label, or describe this session, link it to a ticket (jira), or set/remove session metadata.
+---
+
+# shep-meta
+
+Set metadata on the current supervised session:
+
+    shep meta key=value ...
+
+- Well-known keys: `jira` (ticket key, e.g. PROJ-123), `description` (short summary), `url`.
+- Quote values with spaces: `shep meta description="Fixing login timeout"`.
+- `key=` (empty value) removes a key; `shep meta` alone prints current metadata.
+- Do not pass an agent name — the environment identifies the session.
+
+If the command fails (for example, this session is not supervised by shepherd), report the error in one line and continue with the conversation — never retry or block on it.
+"#;
+
 /// Merge a SessionStart hook entry into ~/.claude/settings.json. Idempotent:
 /// removes any previous shep claude-hook entries first.
 pub fn install_claude_hook() -> std::io::Result<PathBuf> {
@@ -321,5 +582,11 @@ pub fn install_claude_hook() -> std::io::Result<PathBuf> {
     }));
 
     std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+
+    // The shep-meta skill rides along with the hook install.
+    let skill_dir = claude_dir.join("skills").join("shep-meta");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(skill_dir.join("SKILL.md"), SHEP_META_SKILL)?;
+
     Ok(settings_path)
 }

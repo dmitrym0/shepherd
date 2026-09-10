@@ -15,6 +15,9 @@ use crate::protocol::{
     now_epoch_ms, AgentInfo, AgentReportAgentParams, AgentReportMetadataParams,
     AgentReportSessionParams, AgentSessionInfo, AgentStatus, TerminalLocation,
 };
+use crate::store::{
+    MetaValue, SessionMetadata, MAX_KEYS_PER_SESSION, MAX_KEY_CHARS, MAX_VALUE_CHARS,
+};
 
 const MAX_CUSTOM_STATUS_CHARS: usize = 32;
 const MAX_MESSAGE_CHARS: usize = 240;
@@ -105,6 +108,7 @@ pub struct AgentEntry {
     fallback_observed_at: Option<Instant>,
     hook_authority: Option<HookAuthority>,
     metadata: HashMap<String, MetadataEntry>,
+    user_metadata: SessionMetadata,
     persisted_session: Option<PersistedSession>,
     hook_report_sequences: HashMap<String, u64>,
     session_report_sequences: HashMap<String, u64>,
@@ -145,6 +149,7 @@ impl AgentEntry {
             fallback_observed_at: None,
             hook_authority: None,
             metadata: HashMap::new(),
+            user_metadata: SessionMetadata::new(),
             persisted_session: None,
             hook_report_sequences: HashMap::new(),
             session_report_sequences: HashMap::new(),
@@ -385,6 +390,76 @@ impl AgentEntry {
         self.seen = true;
     }
 
+    /// Apply a `shep meta` write: validate everything first (all-or-nothing),
+    /// then upsert/remove. An empty value removes the key. Returns the keys
+    /// removed by this write so the caller can make the deletions durable.
+    pub fn set_user_metadata(
+        &mut self,
+        entries: HashMap<String, String>,
+    ) -> Result<Vec<String>, String> {
+        if entries.is_empty() {
+            return Err("entries must not be empty".to_string());
+        }
+        let mut upserts: Vec<(String, String)> = Vec::new();
+        let mut removals: Vec<String> = Vec::new();
+        for (key, raw_value) in entries {
+            let key = key.trim().to_string();
+            if key.is_empty()
+                || key.chars().any(char::is_control)
+                || key.chars().count() > MAX_KEY_CHARS
+            {
+                return Err(format!("invalid metadata key: {key:?}"));
+            }
+            let value: String = raw_value.chars().filter(|ch| !ch.is_control()).collect();
+            let value = value.trim().to_string();
+            if value.chars().count() > MAX_VALUE_CHARS {
+                return Err(format!(
+                    "value for {key:?} exceeds {MAX_VALUE_CHARS} characters"
+                ));
+            }
+            if value.is_empty() {
+                removals.push(key);
+            } else {
+                upserts.push((key, value));
+            }
+        }
+        let new_keys = upserts
+            .iter()
+            .filter(|(key, _)| !self.user_metadata.contains_key(key))
+            .count();
+        let removed_existing = removals
+            .iter()
+            .filter(|key| self.user_metadata.contains_key(*key))
+            .count();
+        if self.user_metadata.len() - removed_existing + new_keys > MAX_KEYS_PER_SESSION {
+            return Err(format!(
+                "a session holds at most {MAX_KEYS_PER_SESSION} metadata keys"
+            ));
+        }
+        let now = now_epoch_ms();
+        for key in &removals {
+            self.user_metadata.remove(key);
+        }
+        for (key, value) in upserts {
+            self.user_metadata.insert(key, MetaValue { value, ts_ms: now });
+        }
+        Ok(removals)
+    }
+
+    pub fn user_metadata(&self) -> &SessionMetadata {
+        &self.user_metadata
+    }
+
+    pub fn replace_user_metadata(&mut self, entries: SessionMetadata) {
+        self.user_metadata = entries;
+    }
+
+    /// Durable-store key for this agent's resumable session, if one is known.
+    pub fn session_store_key(&self) -> Option<String> {
+        self.effective_session()
+            .map(|session| format!("{}:{}", session.kind, session.value))
+    }
+
     /// Latest write wins: --name seeds it, agent renames overwrite it.
     pub fn set_name(&mut self, name: &str) {
         let name = name.trim();
@@ -559,6 +634,11 @@ impl AgentEntry {
                     .map(|(_, state, label)| (state, label))
                     .collect()
             },
+            metadata: self
+                .user_metadata
+                .iter()
+                .map(|(key, value)| (key.clone(), value.value.clone()))
+                .collect(),
             agent_session: self.effective_session(),
             blocked_reason: self.blocked_reason(),
             cwd: Some(self.cwd.clone()),
@@ -760,6 +840,67 @@ mod tests {
         assert!(entry.has_ttl_metadata());
         let (info, _) = entry.snapshot();
         assert_eq!(info.custom_status, None);
+    }
+
+    #[test]
+    fn user_metadata_set_update_remove_roundtrip() {
+        let mut entry = entry();
+        entry
+            .set_user_metadata(
+                [("jira".to_string(), "PROJ-1".to_string())].into(),
+            )
+            .expect("set should succeed");
+        let (info, _) = entry.snapshot();
+        assert_eq!(info.metadata.get("jira").map(String::as_str), Some("PROJ-1"));
+
+        entry
+            .set_user_metadata(
+                [("jira".to_string(), "PROJ-2".to_string())].into(),
+            )
+            .expect("update should succeed");
+        let (info, _) = entry.snapshot();
+        assert_eq!(info.metadata.get("jira").map(String::as_str), Some("PROJ-2"));
+
+        let removed = entry
+            .set_user_metadata([("jira".to_string(), String::new())].into())
+            .expect("remove should succeed");
+        assert_eq!(removed, vec!["jira".to_string()]);
+        let (info, _) = entry.snapshot();
+        assert!(info.metadata.is_empty());
+    }
+
+    #[test]
+    fn user_metadata_rejects_bad_input_without_applying() {
+        let mut entry = entry();
+        let result = entry.set_user_metadata(
+            [
+                ("ok".to_string(), "fine".to_string()),
+                ("".to_string(), "bad key".to_string()),
+            ]
+            .into(),
+        );
+        assert!(result.is_err());
+        assert!(entry.user_metadata().is_empty(), "all-or-nothing");
+
+        assert!(entry.set_user_metadata(HashMap::new()).is_err());
+        assert!(entry
+            .set_user_metadata([("v".to_string(), "x".repeat(600))].into())
+            .is_err());
+    }
+
+    #[test]
+    fn session_store_key_uses_session_ref() {
+        let mut entry = entry();
+        assert_eq!(entry.session_store_key(), None);
+        entry.set_session(AgentReportSessionParams {
+            agent_id: "agent_1".to_string(),
+            source: "shepherd:claude".to_string(),
+            agent: "claude".to_string(),
+            seq: None,
+            agent_session_id: Some("s-9".to_string()),
+            agent_session_path: None,
+        });
+        assert_eq!(entry.session_store_key().as_deref(), Some("session_id:s-9"));
     }
 
     #[test]

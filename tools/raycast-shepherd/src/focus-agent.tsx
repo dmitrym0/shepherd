@@ -20,6 +20,7 @@ type Agent = {
   agent_status: string;
   blocked_reason?: string;
   cwd?: string;
+  metadata?: Record<string, string>;
   terminal?: { app: string; session_id: string };
 };
 
@@ -34,6 +35,7 @@ const TAG_COLOR: Record<string, Color> = {
 export default function Command() {
   const [agents, setAgents] = useState<Agent[]>();
   const [error, setError] = useState<string>();
+  const [jiraBase, setJiraBase] = useState<string>();
 
   useEffect(() => {
     fetch("http://localhost:4650/agents")
@@ -42,6 +44,10 @@ export default function Command() {
         setAgents(a.sort((x, y) => (ORDER[x.agent_status] ?? 9) - (ORDER[y.agent_status] ?? 9))),
       )
       .catch(() => setError("shepherd server not running"));
+    fetch("http://localhost:4650/config")
+      .then((r) => r.json() as Promise<{ jira_base_url?: string }>)
+      .then((c) => setJiraBase(c.jira_base_url))
+      .catch(() => {});
   }, []);
 
   return (
@@ -53,14 +59,23 @@ export default function Command() {
           <List.Item
             key={a.agent_id}
             title={a.name ?? a.agent ?? a.agent_id}
-            subtitle={a.blocked_reason ?? a.cwd}
+            subtitle={a.metadata?.description ?? a.blocked_reason ?? a.cwd}
+            keywords={Object.entries(a.metadata ?? {}).flatMap(([k, v]) => [k, v, `${k}=${v}`])}
             accessories={[
+              ...(a.metadata?.jira ? [{ text: a.metadata.jira }] : []),
               { tag: { value: a.agent_status, color: TAG_COLOR[a.agent_status] ?? Color.SecondaryText } },
               ...(a.terminal ? [] : [{ text: "no terminal" }]),
             ]}
             actions={
               <ActionPanel>
                 <Action title="Focus Terminal" onAction={() => focus(a)} />
+                {a.metadata?.jira && jiraBase && (
+                  <Action.OpenInBrowser
+                    title="Open Jira Ticket"
+                    url={`${jiraBase.replace(/\/+$/, "")}/browse/${a.metadata.jira}`}
+                  />
+                )}
+                {a.metadata?.url && <Action.OpenInBrowser title="Open URL" url={a.metadata.url} />}
               </ActionPanel>
             }
           />

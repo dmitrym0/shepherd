@@ -73,6 +73,10 @@ pub enum Method {
     /// Hook clears its authority. Mirrors herdr's pane.clear_agent_authority.
     #[serde(rename = "agent.clear_authority")]
     AgentClearAuthority(AgentClearAuthorityParams),
+    /// Set durable user metadata on an agent (`shep meta` / the shep-meta
+    /// skill). An empty value removes the key.
+    #[serde(rename = "agent.set_metadata")]
+    AgentSetMetadata(AgentSetMetadataParams),
     /// Snapshot of all agents (local clients, e.g. `shep status`).
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
@@ -194,6 +198,12 @@ pub struct AgentReportMetadataParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSetMetadataParams {
+    pub agent_id: String,
+    pub entries: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentClearAuthorityParams {
     pub agent_id: String,
     pub source: String,
@@ -284,6 +294,9 @@ pub struct AgentInfo {
     pub custom_status: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
+    /// User/agent-written session metadata (sibling of state_labels; durable).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,6 +332,22 @@ mod tests {
             Method::AgentReportSession(params) => {
                 assert_eq!(params.agent_id, "a1");
                 assert_eq!(params.agent_session_id.as_deref(), Some("s-123"));
+            }
+            other => panic!("unexpected method: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_metadata_request_parses() {
+        let request: Request = serde_json::from_str(
+            r#"{"id":2,"method":"agent.set_metadata","params":{"agent_id":"agent_1","entries":{"jira":"PROJ-123","stale":""}}}"#,
+        )
+        .expect("request should parse");
+        match request.method {
+            Method::AgentSetMetadata(params) => {
+                assert_eq!(params.agent_id, "agent_1");
+                assert_eq!(params.entries.get("jira").map(String::as_str), Some("PROJ-123"));
+                assert_eq!(params.entries.get("stale").map(String::as_str), Some(""));
             }
             other => panic!("unexpected method: {other:?}"),
         }

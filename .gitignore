@@ -1,1 +1,5 @@
 .claude/worktrees/
+target/
+*.log
+.DS_Store
+specs/

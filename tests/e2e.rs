@@ -31,6 +31,8 @@ fn start_server(tag: &str) -> ServerHandle {
         .arg("serve")
         .env("SHEPHERD_SOCKET_PATH", &socket)
         .env("SHEPHERD_HTTP_PORT", port.to_string())
+        // Hermetic ~/.shepherd: the server persists metadata under HOME.
+        .env("HOME", &dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -221,6 +223,113 @@ fn events_subscribe_streams_snapshot_and_updates() {
     let event: serde_json::Value = serde_json::from_str(&line).expect("event should be JSON");
     assert_eq!(event["event"], "agent_added");
     assert_eq!(event["data"]["agent_status"], "idle");
+}
+
+#[test]
+fn metadata_survives_server_restart() {
+    let server = start_server("durable");
+    let socket_path = server.socket.clone();
+
+    let (mut stream, mut reader) = connect(&server.socket);
+    let response = send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({
+            "id": 1,
+            "method": "agent.register",
+            "params": {"name": "durable", "agent": "claude", "argv": ["claude"], "cwd": "/tmp", "pid": 7}
+        }),
+    );
+    let agent_id = response["result"]["agent_id"]
+        .as_str()
+        .expect("register should return an agent id")
+        .to_string();
+
+    // Metadata written before the session id is known stays visible...
+    let response = send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({
+            "id": 2,
+            "method": "agent.set_metadata",
+            "params": {"agent_id": agent_id, "entries": {"jira": "PROJ-9"}}
+        }),
+    );
+    assert!(response["error"].is_null(), "set should succeed: {response}");
+    let agents = list_agents(&server.socket);
+    assert_eq!(agents[0]["metadata"]["jira"], "PROJ-9");
+
+    // ...and becomes durable once the resumable session id arrives.
+    send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({
+            "id": 3,
+            "method": "agent.report_session",
+            "params": {"agent_id": agent_id, "source": "shepherd:claude", "agent": "claude", "seq": 1, "agent_session_id": "sess-42"}
+        }),
+    );
+    send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({
+            "id": 4,
+            "method": "agent.set_metadata",
+            "params": {"agent_id": agent_id, "entries": {"description": "durability check"}}
+        }),
+    );
+
+    // Unknown agents are rejected.
+    let response = send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({
+            "id": 5,
+            "method": "agent.set_metadata",
+            "params": {"agent_id": "agent_999", "entries": {"k": "v"}}
+        }),
+    );
+    assert!(!response["error"].is_null(), "unknown agent should error");
+
+    // Restart the server (same HOME, same socket path), resume the session.
+    drop(stream);
+    drop(reader);
+    drop(server);
+    let _ = std::fs::remove_file(&socket_path);
+    let server = start_server("durable");
+
+    let (mut stream, mut reader) = connect(&server.socket);
+    let response = send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({
+            "id": 1,
+            "method": "agent.register",
+            "params": {"name": "resumed", "agent": "claude", "argv": ["claude"], "cwd": "/tmp", "pid": 8}
+        }),
+    );
+    let agent_id = response["result"]["agent_id"]
+        .as_str()
+        .expect("register should return an agent id")
+        .to_string();
+    let agents = list_agents(&server.socket);
+    assert!(
+        agents[0]["metadata"].is_null(),
+        "no metadata before the session id reattaches"
+    );
+
+    send_request(
+        &mut stream,
+        &mut reader,
+        serde_json::json!({
+            "id": 2,
+            "method": "agent.report_session",
+            "params": {"agent_id": agent_id, "source": "shepherd:claude", "agent": "claude", "seq": 1, "agent_session_id": "sess-42"}
+        }),
+    );
+    let agents = list_agents(&server.socket);
+    assert_eq!(agents[0]["metadata"]["jira"], "PROJ-9");
+    assert_eq!(agents[0]["metadata"]["description"], "durability check");
 }
 
 #[test]

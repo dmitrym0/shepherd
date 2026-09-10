@@ -22,6 +22,7 @@ use crate::protocol::{
     EVENT_AGENT_ADDED, EVENT_AGENT_REMOVED, EVENT_AGENT_UPDATED, EVENT_SNAPSHOT,
 };
 use crate::state::AgentEntry;
+use crate::store::{merge_newest, Config, MetadataStore};
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 
@@ -29,14 +30,16 @@ struct Registry {
     agents: HashMap<u64, AgentEntry>,
     next_id: u64,
     events: broadcast::Sender<String>,
+    store: MetadataStore,
 }
 
 impl Registry {
-    fn new(events: broadcast::Sender<String>) -> Self {
+    fn new(events: broadcast::Sender<String>, store: MetadataStore) -> Self {
         Self {
             agents: HashMap::new(),
             next_id: 1,
             events,
+            store,
         }
     }
 
@@ -107,6 +110,55 @@ impl Registry {
         }
         Ok(())
     }
+
+    /// Apply a user metadata write, reconcile with the durable store, emit.
+    fn set_user_metadata(
+        &mut self,
+        agent_id: &str,
+        entries: HashMap<String, String>,
+    ) -> Result<(), String> {
+        let id = parse_agent_id(agent_id)?;
+        let live = self.agents.len();
+        let entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown agent: {agent_id} ({live} live)"))?;
+        let removed = entry.set_user_metadata(entries)?;
+        self.sync_metadata(id, &removed);
+        self.update_agent(agent_id, |_| {})
+    }
+
+    /// Reconcile one entry's metadata with the durable store and persist:
+    /// per-key newest wins across both, except keys the current write
+    /// removed, which stay removed. No-op until the agent has a resumable
+    /// session (pre-identity metadata lives only on the entry).
+    fn sync_metadata(&mut self, id: u64, removed: &[String]) {
+        let Some(entry) = self.agents.get_mut(&id) else {
+            return;
+        };
+        let Some(session_key) = entry.session_store_key() else {
+            return;
+        };
+        let mut merged = entry.user_metadata().clone();
+        if let Some(stored) = self.store.get(&session_key) {
+            merge_newest(&mut merged, stored);
+        }
+        for key in removed {
+            merged.remove(key);
+        }
+        entry.replace_user_metadata(merged.clone());
+        self.store.replace(&session_key, merged);
+    }
+
+    /// Re-attach stored metadata after a session identity arrives (resume,
+    /// restart, or first hook report), then emit if the snapshot changed.
+    fn resync_metadata(&mut self, agent_id: &str) {
+        let Ok(id) = parse_agent_id(agent_id) else {
+            return;
+        };
+        self.sync_metadata(id, &[]);
+        let _ = self.update_agent(agent_id, |_| {});
+    }
 }
 
 fn parse_agent_id(agent_id: &str) -> Result<u64, String> {
@@ -131,7 +183,10 @@ impl Shared {
 pub async fn serve() -> std::io::Result<()> {
     let (events, _) = broadcast::channel(1024);
     let shared = Shared {
-        registry: Arc::new(Mutex::new(Registry::new(events.clone()))),
+        registry: Arc::new(Mutex::new(Registry::new(
+            events.clone(),
+            MetadataStore::load(MetadataStore::default_path()),
+        ))),
         events,
     };
 
@@ -179,6 +234,7 @@ pub async fn serve() -> std::io::Result<()> {
     let app = axum::Router::new()
         .route("/", get(index))
         .route("/agents", get(agents))
+        .route("/config", get(config))
         .route("/ws", get(ws_upgrade))
         .with_state(shared);
 
@@ -308,16 +364,18 @@ fn handle_request(
         }
         Method::AgentReportAgent(params) => {
             let agent_id = params.agent_id.clone();
-            shared.lock().update_agent(&agent_id, |entry| {
+            let mut registry = shared.lock();
+            registry.update_agent(&agent_id, |entry| {
                 entry.set_hook_authority(params, Instant::now());
             })?;
+            registry.resync_metadata(&agent_id);
             Ok(serde_json::json!({}))
         }
         Method::AgentReportSession(params) => {
             let agent_id = params.agent_id.clone();
-            shared
-                .lock()
-                .update_agent(&agent_id, |entry| entry.set_session(params))?;
+            let mut registry = shared.lock();
+            registry.update_agent(&agent_id, |entry| entry.set_session(params))?;
+            registry.resync_metadata(&agent_id);
             Ok(serde_json::json!({}))
         }
         Method::AgentReportMetadata(params) => {
@@ -326,6 +384,12 @@ fn handle_request(
                 entry.set_metadata(params, Instant::now());
             })?;
             Ok(serde_json::json!({}))
+        }
+        Method::AgentSetMetadata(params) => {
+            shared
+                .lock()
+                .set_user_metadata(&params.agent_id, params.entries)?;
+            Ok(serde_json::json!({"ok": true}))
         }
         Method::AgentClearAuthority(params) => {
             shared.lock().update_agent(&params.agent_id, |entry| {
@@ -403,6 +467,10 @@ async fn index() -> Html<&'static str> {
 
 async fn agents(State(shared): State<Shared>) -> Json<Vec<AgentInfo>> {
     Json(shared.lock().snapshot_all())
+}
+
+async fn config() -> Json<Config> {
+    Json(Config::load())
 }
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(shared): State<Shared>) -> impl IntoResponse {
