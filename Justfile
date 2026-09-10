@@ -1,6 +1,20 @@
 default:
     @just --list
 
+# Cut a release; bump size derived from git-bug tickets closed since the last
+# tag (feature -> minor, else patch). See docs/RELEASING.md.
+release *ARGS:
+    scripts/release.sh {{ARGS}}
+
+# Manual release: `just release-manual 0.3.0` or `just release-manual minor`.
+release-manual target *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+      major|minor|patch) exec scripts/release.sh --bump "{{target}}" {{ARGS}} ;;
+      *) exec scripts/release.sh --version "{{target}}" {{ARGS}} ;;
+    esac
+
 # Build the release binary and overwrite the brew-installed shep with it.
 install-local:
     #!/usr/bin/env bash
