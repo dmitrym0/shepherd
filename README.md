@@ -42,6 +42,39 @@ The killer state is **blocked** — an agent waiting on your input. **done**
 means an agent finished while you were away; it flips back to **idle** the
 moment you type into it again.
 
+## Session metadata
+
+Tag a session with key=value pairs and find it later:
+
+```sh
+shep meta refactor jira=PROJ-123 description="Fixing login timeout"
+shep meta refactor            # show its metadata
+shep meta refactor jira=      # remove a key
+shep status PROJ-123          # filter: bare term or key=value
+```
+
+Run inside a supervised session, `shep meta` needs no agent name — the
+environment identifies it. Metadata follows the agent's resumable session id,
+not the process: restart the server or resume the session days later and the
+tags reattach (stored in `~/.shepherd/metadata.json`, at most 64 keys per
+session).
+
+Three keys get special treatment. `description` appears on the web card, the
+status table and the Raycast subtitle. `jira` and `url` render as links; for
+Jira, set the base URL once:
+
+```sh
+printf 'jira_base_url = "https://mycorp.atlassian.net"\n' > ~/.shepherd/config.toml
+```
+
+Every list of sessions is searchable: the web monitor has a filter box,
+`shep status <term>` filters the table and Raycast matches metadata in its
+search bar.
+
+Claude can tag its own session. `shep install-claude-hook` installs a
+`shep-meta` skill beside the session hook; say "tag this session with jira
+PROJ-123" and Claude runs `shep meta` itself.
+
 ## How it works
 
 ```
