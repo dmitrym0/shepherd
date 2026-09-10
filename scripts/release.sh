@@ -56,6 +56,23 @@ for bug in json.load(sys.stdin):
         print("%s\t%s\t%s" % (bug["id"][:7], labels, bug["title"]))
 ' "$CUTOFF" || true)
 
+# The release's own "released in vX.Y.Z" comments bump each shipped ticket's
+# edit_time past the new tag's cutoff, so without this filter every shipped
+# ticket would be recounted in the next release forever.
+# ponytail: a ticket reopened after shipping never recounts (its old release
+# comment sticks); use --bump/--version manually for that rare case.
+if [ -n "$TICKET_LINES" ]; then
+  UNSHIPPED=""
+  while IFS= read -r line; do
+    id=${line%%	*}
+    if git-bug bug show "$id" 2>/dev/null | grep -q "released in v"; then
+      continue
+    fi
+    UNSHIPPED="${UNSHIPPED}${UNSHIPPED:+$'\n'}${line}"
+  done <<< "$TICKET_LINES"
+  TICKET_LINES="$UNSHIPPED"
+fi
+
 # --- pick the version --------------------------------------------------------
 if [ -z "$VERSION" ] && [ -z "$BUMP" ]; then
   if [ -z "$TICKET_LINES" ]; then
