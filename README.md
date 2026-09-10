@@ -69,6 +69,17 @@ Polling (`GET /agents`), streaming (`ws://localhost:4650/ws`), and the unix
 socket all serve the same JSON — see [docs/API.md](docs/API.md) for the agent
 object schema, status semantics, and the consumer contract.
 
+## Tools
+
+The `tools/` directory holds three ready-made consumers. Each can jump
+straight to the iTerm2 tab or tmux pane where an agent runs.
+
+| Tool                          | What it does |
+|-------------------------------|--------------|
+| `tools/focus-agent.sh`        | Focuses an agent's terminal, given a name, an iTerm2 session UUID or a tmux pane id. The other two build on it. |
+| `tools/claude.5s.sh`          | SwiftBar menu-bar plugin: lists every agent, turns red when one needs input; clicking an agent focuses its terminal. |
+| `tools/raycast-shepherd/`     | Raycast extension: a native, filterable list of agents with blocked ones on top; Enter focuses. Install with `npm install && npm run dev` in that directory. |
+
 ## Configuration
 
 | Env var                | Default                     |
