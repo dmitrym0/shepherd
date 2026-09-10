@@ -123,7 +123,10 @@ fn register_report_list_and_removal_on_disconnect() {
             "params": {"agent_id": agent_id, "agent": "claude", "state": "working", "visible_working": true}
         }),
     );
-    assert!(response["error"].is_null(), "report should succeed: {response}");
+    assert!(
+        response["error"].is_null(),
+        "report should succeed: {response}"
+    );
     let agents = list_agents(&server.socket);
     assert_eq!(agents[0]["agent_status"], "working");
 
@@ -333,6 +336,65 @@ fn metadata_survives_server_restart() {
 }
 
 #[test]
+fn wrapper_reconnects_after_server_restart_keeping_its_id() {
+    let mut server = start_server("restart");
+
+    let mut wrapper = Command::new(env!("CARGO_BIN_EXE_shep"))
+        .args(["run", "--name", "phoenix", "--", "sh", "-c", "sleep 60"])
+        .env("SHEPHERD_SOCKET_PATH", &server.socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("wrapper should spawn");
+
+    // Registered on the first server.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let agent_id = loop {
+        let agents = list_agents(&server.socket);
+        if agents.len() == 1 {
+            break agents[0]["agent_id"]
+                .as_str()
+                .expect("agent should have an id")
+                .to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wrapper should register its agent"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    // Kill the server; the wrapper keeps running. Remove the stale socket
+    // file so start_server's existence check waits for the new server.
+    server.child.kill().expect("server should die");
+    server.child.wait().expect("server should be reaped");
+    std::fs::remove_file(&server.socket).ok();
+
+    let server2 = start_server("restart");
+
+    // The session reappears on its own, under the same id and name,
+    // within the spec's 30 s bound.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let agents = list_agents(&server2.socket);
+        if agents.len() == 1 {
+            assert_eq!(agents[0]["agent_id"], agent_id.as_str());
+            assert_eq!(agents[0]["name"], "phoenix");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session should reappear after the server restart"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = wrapper.kill();
+    let _ = wrapper.wait();
+}
+
+#[test]
 fn wrapper_runs_a_command_and_registers_it() {
     let server = start_server("wrapper");
 
@@ -353,7 +415,10 @@ fn wrapper_runs_a_command_and_registers_it() {
             assert_eq!(agents[0]["name"], "smoke");
             break;
         }
-        assert!(Instant::now() < deadline, "wrapper should register its agent");
+        assert!(
+            Instant::now() < deadline,
+            "wrapper should register its agent"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 

@@ -37,7 +37,13 @@ impl Registry {
     fn new(events: broadcast::Sender<String>, store: MetadataStore) -> Self {
         Self {
             agents: HashMap::new(),
-            next_id: 1,
+            // Epoch-seeded so ids issued after a server restart can never
+            // collide with ids held by wrappers that re-register with the
+            // id they got before the restart. ponytail: seeding beats
+            // persisting next_id; a collision needs two registrations in
+            // the same millisecond across a restart, and the occupied-id
+            // fallback in register() absorbs even that.
+            next_id: crate::protocol::now_epoch_ms(),
             events,
             store,
         }
@@ -53,8 +59,21 @@ impl Registry {
     }
 
     fn register(&mut self, entry_fields: crate::protocol::AgentRegisterParams) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        // A reconnecting wrapper asks for its original id back; honor it
+        // when free (the response's agent_id stays authoritative either way).
+        let requested = entry_fields
+            .agent_id
+            .as_deref()
+            .and_then(|id| parse_agent_id(id).ok())
+            .filter(|id| !self.agents.contains_key(id));
+        let id = if let Some(id) = requested {
+            self.next_id = self.next_id.max(id + 1);
+            id
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        };
         let mut entry = AgentEntry::new(
             id,
             entry_fields.name,
@@ -65,7 +84,10 @@ impl Registry {
         );
         let (info, _) = entry.snapshot();
         self.agents.insert(id, entry);
-        self.emit(EVENT_AGENT_ADDED, serde_json::to_value(info).expect("info should serialize"));
+        self.emit(
+            EVENT_AGENT_ADDED,
+            serde_json::to_value(info).expect("info should serialize"),
+        );
         id
     }
 
@@ -176,7 +198,9 @@ struct Shared {
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, Registry> {
-        self.registry.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -253,7 +277,10 @@ fn bind_ingest_socket(path: &Path) -> std::io::Result<UnixListener> {
             Ok(_) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AddrInUse,
-                    format!("a shepherd server is already listening at {}", path.display()),
+                    format!(
+                        "a shepherd server is already listening at {}",
+                        path.display()
+                    ),
                 ));
             }
             Err(_) => {
@@ -509,5 +536,64 @@ async fn handle_ws(mut socket: WebSocket, shared: Shared) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> Registry {
+        // A nonexistent path loads as an empty store; these tests never
+        // write metadata, so nothing is persisted.
+        let store = crate::store::MetadataStore::load(
+            std::env::temp_dir().join(format!("shep-registry-test-{}.json", std::process::id())),
+        );
+        Registry::new(broadcast::channel(8).0, store)
+    }
+
+    fn params(agent_id: Option<&str>) -> crate::protocol::AgentRegisterParams {
+        crate::protocol::AgentRegisterParams {
+            agent_id: agent_id.map(str::to_string),
+            name: None,
+            agent: Some("claude".to_string()),
+            argv: vec!["claude".to_string()],
+            cwd: "/tmp".to_string(),
+            pid: 1,
+            terminal: None,
+        }
+    }
+
+    #[test]
+    fn next_id_is_epoch_seeded() {
+        // Not starting from 1: a restarted server must never re-issue ids
+        // that wrappers obtained before the restart.
+        assert!(registry().next_id > 1_000_000);
+    }
+
+    #[test]
+    fn register_honors_a_free_requested_id() {
+        let mut registry = registry();
+        assert_eq!(registry.register(params(Some("agent_42"))), 42);
+        // next_id advanced past the requested id and fresh ids don't collide.
+        let fresh = registry.register(params(None));
+        assert_ne!(fresh, 42);
+        assert!(registry.agents.contains_key(&42));
+    }
+
+    #[test]
+    fn register_falls_back_when_requested_id_is_occupied() {
+        let mut registry = registry();
+        assert_eq!(registry.register(params(Some("agent_7"))), 7);
+        let second = registry.register(params(Some("agent_7")));
+        assert_ne!(second, 7);
+        assert_eq!(registry.agents.len(), 2);
+    }
+
+    #[test]
+    fn register_falls_back_on_malformed_requested_id() {
+        let mut registry = registry();
+        let seeded_next = registry.next_id;
+        assert_eq!(registry.register(params(Some("banana"))), seeded_next);
     }
 }

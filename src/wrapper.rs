@@ -25,6 +25,13 @@ const SEEN_REPORT_THROTTLE: Duration = Duration::from_secs(2);
 const CLAUDE_SESSION_POLL: Duration = Duration::from_secs(2);
 const VT_SCROLLBACK_LINES: usize = 500;
 
+/// Keepalive cadence: a ping's failed write is how a session (idle ones
+/// included) detects a dead server. With the reconnect ceiling below it
+/// keeps reappearance well inside the spec's 30 s bound.
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+const RECONNECT_INITIAL: Duration = Duration::from_millis(100);
+const RECONNECT_CEILING: Duration = Duration::from_secs(5);
+
 /// Terminal emulation state fed by the PTY reader, read by the detection loop.
 struct Emulation {
     parser: vt100::Parser,
@@ -33,19 +40,144 @@ struct Emulation {
 
 struct IngestClient {
     writer: Mutex<UnixStream>,
+    /// Set by any failed write; cleared by the keepalive thread once a
+    /// reconnect succeeds.
+    broken: AtomicBool,
+    /// Launch-time registration payload with `agent_id` filled in after the
+    /// first registration — re-sent verbatim on every reconnect so the
+    /// session keeps the id baked into the child's SHEPHERD_AGENT_ID.
+    register_params: crate::protocol::AgentRegisterParams,
+    /// Replay cache: the latest rename/detection sent, re-sent after a
+    /// re-registration so the dashboard converges to current state instead
+    /// of waiting for the next change. Nothing else is buffered — events
+    /// during an outage are dropped by design.
+    last_rename: Mutex<Option<Method>>,
+    last_detection: Mutex<Option<Method>>,
 }
 
 impl IngestClient {
     /// Fire-and-forget notification; responses are drained by a separate
-    /// thread. Errors are ignored — a dead server must never break the
-    /// user's terminal session.
+    /// thread. Errors never surface to callers — a dead server must never
+    /// break the user's terminal session — but they flag the connection
+    /// broken so the keepalive thread reconnects.
     fn notify(&self, method: Method) {
+        match &method {
+            Method::AgentRename(_) => cache(&self.last_rename, &method),
+            Method::AgentReportDetection(_) => cache(&self.last_detection, &method),
+            _ => {}
+        }
         let request = Request { id: None, method };
         let mut line = serde_json::to_string(&request).expect("request should serialize");
         line.push('\n');
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = writer.write_all(line.as_bytes());
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if writer.write_all(line.as_bytes()).is_err() {
+            self.broken.store(true, Ordering::Release);
         }
+    }
+
+    /// Current state to re-send after a re-registration.
+    fn replay_methods(&self) -> Vec<Method> {
+        [&self.last_rename, &self.last_detection]
+            .into_iter()
+            .filter_map(|slot| {
+                slot.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            })
+            .collect()
+    }
+
+    /// Blocks until the server is back: connect-only with exponential
+    /// backoff — this path never starts a server; something else owns the
+    /// server's lifecycle. On success, re-registers under the original
+    /// agent id and replays current state.
+    fn reconnect(&self, stop: &AtomicBool) {
+        let path = socket_path();
+        let mut delay = RECONNECT_INITIAL;
+        loop {
+            std::thread::sleep(delay);
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            delay = next_backoff(delay);
+            let Ok(mut stream) = UnixStream::connect(&path) else {
+                continue;
+            };
+            let Ok(clone) = stream.try_clone() else {
+                continue;
+            };
+            let mut reader = BufReader::new(clone);
+            // ponytail: a mismatched id in the response (our id occupied on
+            // the fresh server) is ignored — epoch-seeded server ids make
+            // it unreachable, and the child's SHEPHERD_AGENT_ID can't
+            // change after spawn anyway.
+            if register_handshake(&mut stream, &mut reader, &self.register_params).is_err() {
+                continue;
+            }
+            *self
+                .writer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = stream;
+            self.broken.store(false, Ordering::Release);
+            std::thread::spawn(move || drain_responses(reader));
+            for method in self.replay_methods() {
+                self.notify(method);
+            }
+            return;
+        }
+    }
+}
+
+fn cache(slot: &Mutex<Option<Method>>, method: &Method) {
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(method.clone());
+}
+
+fn next_backoff(delay: Duration) -> Duration {
+    (delay * 2).min(RECONNECT_CEILING)
+}
+
+/// Sends agent.register and reads the response. Used at launch and on every
+/// reconnect; `params.agent_id` carries the retained id when present.
+fn register_handshake(
+    stream: &mut UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    params: &crate::protocol::AgentRegisterParams,
+) -> std::io::Result<String> {
+    let request = Request {
+        id: Some(serde_json::json!(1)),
+        method: Method::AgentRegister(params.clone()),
+    };
+    let mut line = serde_json::to_string(&request).expect("request should serialize");
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
+    let mut response_line = String::new();
+    reader.read_line(&mut response_line)?;
+    if response_line.is_empty() {
+        return Err(std::io::Error::other("server closed during registration"));
+    }
+    let response: Response = serde_json::from_str(&response_line)
+        .map_err(|err| std::io::Error::other(format!("bad register response: {err}")))?;
+    response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("agent_id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| std::io::Error::other("server did not return an agent_id"))
+}
+
+/// Drains server responses so the server never blocks writing to us; exits
+/// on EOF when its connection dies.
+fn drain_responses(mut reader: BufReader<UnixStream>) {
+    let mut sink = String::new();
+    while let Ok(read) = reader.read_line(&mut sink) {
+        if read == 0 {
+            break;
+        }
+        sink.clear();
     }
 }
 
@@ -59,55 +191,34 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
     let agent = identify_agent_from_argv(&argv);
     let agent_label = agent.map(|agent| crate::detect::agent_label(agent).to_string());
 
-    // Connect (auto-starting the server if needed) and register.
-    let stream = connect_or_start_server()?;
+    // Connect (auto-starting the server if needed — launch only; the
+    // reconnect path is retry-only) and register.
+    let mut stream = connect_or_start_server()?;
     let mut reader = BufReader::new(stream.try_clone()?);
+    let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+    let mut register_params = crate::protocol::AgentRegisterParams {
+        agent_id: None,
+        name,
+        agent: agent_label.clone(),
+        argv: argv.clone(),
+        cwd,
+        pid: std::process::id(),
+        terminal: detect_terminal_location(|var| std::env::var(var).ok()),
+    };
+    let agent_id = register_handshake(&mut stream, &mut reader, &register_params)?;
+    // Future re-registrations must reclaim this exact id: it's exported to
+    // the child as SHEPHERD_AGENT_ID and hooks report with it for life.
+    register_params.agent_id = Some(agent_id.clone());
     let client = Arc::new(IngestClient {
         writer: Mutex::new(stream),
+        broken: AtomicBool::new(false),
+        register_params,
+        last_rename: Mutex::new(None),
+        last_detection: Mutex::new(None),
     });
-    let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
-    let register = Request {
-        id: Some(serde_json::json!(1)),
-        method: Method::AgentRegister(crate::protocol::AgentRegisterParams {
-            name,
-            agent: agent_label.clone(),
-            argv: argv.clone(),
-            cwd,
-            pid: std::process::id(),
-            terminal: detect_terminal_location(|var| std::env::var(var).ok()),
-        }),
-    };
-    {
-        let mut line = serde_json::to_string(&register).expect("request should serialize");
-        line.push('\n');
-        let mut writer = client
-            .writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        writer.write_all(line.as_bytes())?;
-    }
-    let mut response_line = String::new();
-    reader.read_line(&mut response_line)?;
-    let response: Response = serde_json::from_str(&response_line)
-        .map_err(|err| std::io::Error::other(format!("bad register response: {err}")))?;
-    let agent_id = response
-        .result
-        .as_ref()
-        .and_then(|result| result.get("agent_id"))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| std::io::Error::other("server did not return an agent_id"))?
-        .to_string();
 
     // Drain further responses so the server never blocks writing to us.
-    std::thread::spawn(move || {
-        let mut sink = String::new();
-        while let Ok(read) = reader.read_line(&mut sink) {
-            if read == 0 {
-                break;
-            }
-            sink.clear();
-        }
-    });
+    std::thread::spawn(move || drain_responses(reader));
 
     // Spawn the agent under a PTY sized to the real terminal.
     let (rows, cols) = terminal_size();
@@ -127,7 +238,10 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
     command.env("SHEPHERD_ENV", "1");
     command.env("SHEPHERD_SOCKET_PATH", socket_path());
     command.env("SHEPHERD_AGENT_ID", &agent_id);
-    let mut child = pty.slave.spawn_command(command).map_err(std::io::Error::other)?;
+    let mut child = pty
+        .slave
+        .spawn_command(command)
+        .map_err(std::io::Error::other)?;
     drop(pty.slave);
     let master = pty.master;
 
@@ -154,7 +268,11 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
                         let bytes = &buf[..read];
-                        if stdout.write_all(bytes).and_then(|()| stdout.flush()).is_err() {
+                        if stdout
+                            .write_all(bytes)
+                            .and_then(|()| stdout.flush())
+                            .is_err()
+                        {
                             break;
                         }
                         {
@@ -188,8 +306,8 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
                             break;
                         }
                         let _ = pty_writer.flush();
-                        let due = last_seen_report
-                            .is_none_or(|at| at.elapsed() >= SEEN_REPORT_THROTTLE);
+                        let due =
+                            last_seen_report.is_none_or(|at| at.elapsed() >= SEEN_REPORT_THROTTLE);
                         if due {
                             last_seen_report = Some(Instant::now());
                             client.notify(Method::AgentSeen(crate::protocol::AgentTarget {
@@ -236,6 +354,26 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
                 poll_claude_session_name(child_pid, &agent_id, &client, &stop);
             });
         }
+    }
+
+    // Keepalive + reconnect: the periodic ping doubles as the liveness
+    // probe (its failed write flips `broken`, even for idle sessions);
+    // this thread then reconnects, re-registers, and replays state.
+    {
+        let client = client.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(PING_INTERVAL);
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            if !client.broken.load(Ordering::Acquire) {
+                client.notify(Method::Ping(crate::protocol::EmptyParams {}));
+            }
+            if client.broken.load(Ordering::Acquire) {
+                client.reconnect(&stop);
+            }
+        });
     }
 
     // Detection loop.
@@ -564,6 +702,103 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::detect_terminal_location;
+    use super::{next_backoff, IngestClient, RECONNECT_CEILING, RECONNECT_INITIAL};
+    use crate::protocol::Method;
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    fn test_client(stream: UnixStream) -> IngestClient {
+        IngestClient {
+            writer: Mutex::new(stream),
+            broken: AtomicBool::new(false),
+            register_params: crate::protocol::AgentRegisterParams {
+                agent_id: Some("agent_1".to_string()),
+                name: None,
+                agent: None,
+                argv: vec!["sh".to_string()],
+                cwd: "/tmp".to_string(),
+                pid: 1,
+                terminal: None,
+            },
+            last_rename: Mutex::new(None),
+            last_detection: Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps_at_the_ceiling() {
+        let mut delay = RECONNECT_INITIAL;
+        let mut schedule = Vec::new();
+        for _ in 0..8 {
+            delay = next_backoff(delay);
+            schedule.push(delay);
+        }
+        assert_eq!(schedule[0], Duration::from_millis(200));
+        assert_eq!(schedule[1], Duration::from_millis(400));
+        assert!(schedule.iter().all(|delay| *delay <= RECONNECT_CEILING));
+        assert_eq!(
+            *schedule.last().expect("schedule is non-empty"),
+            RECONNECT_CEILING
+        );
+    }
+
+    #[test]
+    fn notify_caches_only_the_latest_rename_and_detection() {
+        let (ours, _peer) = UnixStream::pair().expect("socketpair should open");
+        let client = test_client(ours);
+        assert!(client.replay_methods().is_empty());
+
+        client.notify(Method::AgentSeen(crate::protocol::AgentTarget {
+            agent_id: "agent_1".to_string(),
+        }));
+        assert!(
+            client.replay_methods().is_empty(),
+            "seen must not be replayed"
+        );
+
+        client.notify(Method::AgentRename(crate::protocol::AgentRenameParams {
+            agent_id: "agent_1".to_string(),
+            name: "old".to_string(),
+        }));
+        client.notify(Method::AgentRename(crate::protocol::AgentRenameParams {
+            agent_id: "agent_1".to_string(),
+            name: "new".to_string(),
+        }));
+        client.notify(Method::AgentReportDetection(
+            crate::protocol::AgentReportDetectionParams {
+                agent_id: "agent_1".to_string(),
+                agent: None,
+                state: "working".to_string(),
+                visible_blocker: false,
+                visible_working: true,
+                process_exited: false,
+            },
+        ));
+
+        let replay = client.replay_methods();
+        assert_eq!(replay.len(), 2);
+        match &replay[0] {
+            Method::AgentRename(params) => assert_eq!(params.name, "new"),
+            other => panic!("expected rename first, got {other:?}"),
+        }
+        assert!(matches!(replay[1], Method::AgentReportDetection(_)));
+        assert!(!client.broken.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn failed_write_flags_the_connection_broken() {
+        let (ours, peer) = UnixStream::pair().expect("socketpair should open");
+        let client = test_client(ours);
+        drop(peer);
+        // The first write after peer death may land in a buffer; the write
+        // path must flag `broken` once the failure surfaces.
+        for _ in 0..3 {
+            client.notify(Method::Ping(crate::protocol::EmptyParams {}));
+        }
+        assert!(client.broken.load(Ordering::Acquire));
+    }
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let pairs: Vec<(String, String)> = pairs
@@ -632,7 +867,10 @@ mod tests {
         assert_eq!(detect_terminal_location(env(&[])), None);
         // tmux without a pane id: omit rather than guess.
         assert_eq!(
-            detect_terminal_location(env(&[("TMUX", "/tmp/tmux"), ("ITERM_SESSION_ID", "w0t0p0:X")])),
+            detect_terminal_location(env(&[
+                ("TMUX", "/tmp/tmux"),
+                ("ITERM_SESSION_ID", "w0t0p0:X")
+            ])),
             None
         );
     }

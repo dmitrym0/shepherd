@@ -19,7 +19,9 @@ pub fn socket_path() -> std::path::PathBuf {
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::Path::new(&home).join(".shepherd").join("shepherd.sock")
+    std::path::Path::new(&home)
+        .join(".shepherd")
+        .join("shepherd.sock")
 }
 
 pub fn http_port() -> u16 {
@@ -104,6 +106,11 @@ pub struct AgentRenameParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRegisterParams {
+    /// Requested id on re-registration after a reconnect (the wrapper's
+    /// original id, baked into the child's SHEPHERD_AGENT_ID). None on
+    /// first registration. The server honors it when free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Canonical agent label if the wrapper identified one from argv.
@@ -348,6 +355,36 @@ mod tests {
                 assert_eq!(params.agent_id, "agent_1");
                 assert_eq!(params.entries.get("jira").map(String::as_str), Some("PROJ-123"));
                 assert_eq!(params.entries.get("stale").map(String::as_str), Some(""));
+            }
+            other => panic!("unexpected method: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_params_agent_id_is_optional_and_omitted_when_none() {
+        // Old wrappers omit agent_id entirely.
+        let request: Request = serde_json::from_str(
+            r#"{"id":1,"method":"agent.register","params":{"argv":["claude"],"cwd":"/w","pid":1}}"#,
+        )
+        .expect("request should parse");
+        match request.method {
+            Method::AgentRegister(params) => assert!(params.agent_id.is_none()),
+            other => panic!("unexpected method: {other:?}"),
+        }
+
+        // Re-registration carries the retained id.
+        let request: Request = serde_json::from_str(
+            r#"{"id":1,"method":"agent.register","params":{"agent_id":"agent_7","argv":["claude"],"cwd":"/w","pid":1}}"#,
+        )
+        .expect("request should parse");
+        match request.method {
+            Method::AgentRegister(params) => {
+                assert_eq!(params.agent_id.as_deref(), Some("agent_7"));
+                // None serializes to an absent field (wire-compatible).
+                let mut params = params;
+                params.agent_id = None;
+                let json = serde_json::to_string(&params).expect("params should serialize");
+                assert!(!json.contains("agent_id"), "unexpected field in {json}");
             }
             other => panic!("unexpected method: {other:?}"),
         }
