@@ -12,7 +12,8 @@ install-local:
         echo "brew-installed shep not found; install it first: brew install dmitrym0/tap/shep" >&2
         exit 1
     fi
-    cp target/release/shep "$target"
+    # brew installs binaries without the write bit; install(1) replaces in place
+    install -m 0755 target/release/shep "$target"
     echo "overwrote $target -> $("$target" --version)"
     if pgrep -f "shep serve" > /dev/null; then
         echo "note: a shepherd server from the old binary is still running; pkill -f 'shep serve' to cycle it"
