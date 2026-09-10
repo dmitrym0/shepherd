@@ -857,4 +857,20 @@ mod tests {
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
     }
+
+    // Claude Code 2.1.228 replaced the braille spinner with half-circles
+    // (git-bug 6d672ac); both generations must read working.
+    #[test]
+    fn claude_half_circle_spinner_reads_working() {
+        let detection = detect_with_osc(
+            Agent::Claude,
+            DetectionInput {
+                screen: "",
+                osc_title: "◐ refactoring the parser",
+                osc_progress: "",
+            },
+        );
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+    }
 }
