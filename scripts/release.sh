@@ -150,7 +150,7 @@ else
   NEW_FORMULA=$(printf '%s' "$OLD_FORMULA" | sed \
     -e "s|url \".*\"|url \"$TARBALL_URL\"|" \
     -e "s|sha256 \".*\"|sha256 \"$SHA\"|" \
-    -e "s|assert_match \"shep .*\"|assert_match \"shep $VERSION\"|")
+    -e "s|assert_match \"shep [0-9.]*\"|assert_match \"shep $VERSION\"|")
   diff <(printf '%s\n' "$OLD_FORMULA") <(printf '%s\n' "$NEW_FORMULA") || true
   printf '%s' "$NEW_FORMULA" | gh api -X PUT "repos/$TAP_REPO/contents/$FORMULA_PATH" \
     -f message="shep $VERSION" \
