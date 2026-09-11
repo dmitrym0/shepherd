@@ -1,10 +1,9 @@
-//! Local clients of the ingest socket: the `status` command, the Claude Code
-//! hook entry point, and its installer.
+//! Local clients of the ingest socket: the `status` and `meta` commands and
+//! the Claude Code hook entry point. Installers live in install.rs.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 
 use crate::protocol::{
     now_epoch_ms, socket_path, AgentInfo, AgentSetMetadataParams, AgentStatus, Event, Method,
@@ -497,96 +496,4 @@ mod tests {
         let info = info_with_metadata(&[("jira", "PROJ-1"), ("description", "fix login")]);
         assert_eq!(meta_cell(&info), "fix login jira=PROJ-1");
     }
-}
-
-/// Instructions installed as a Claude Code skill so a supervised Claude can
-/// tag its own session; the wrapper-injected SHEPHERD_AGENT_ID targets it.
-const SHEP_META_SKILL: &str = r#"---
-name: shep-meta
-description: Tag the current shepherd-supervised session with metadata. Use when the user asks to tag, label, or describe this session, link it to a ticket (jira), or set/remove session metadata.
----
-
-# shep-meta
-
-Set metadata on the current supervised session:
-
-    shep meta key=value ...
-
-- Well-known keys: `jira` (ticket key, e.g. PROJ-123), `description` (short summary), `url`.
-- Quote values with spaces: `shep meta description="Fixing login timeout"`.
-- `key=` (empty value) removes a key; `shep meta` alone prints current metadata.
-- Do not pass an agent name — the environment identifies the session.
-
-If the command fails (for example, this session is not supervised by shepherd), report the error in one line and continue with the conversation — never retry or block on it.
-"#;
-
-/// Merge a SessionStart hook entry into ~/.claude/settings.json. Idempotent:
-/// removes any previous shep claude-hook entries first.
-pub fn install_claude_hook() -> std::io::Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .map_err(|_| std::io::Error::other("HOME is not set"))?;
-    let claude_dir = std::path::Path::new(&home).join(".claude");
-    if !claude_dir.is_dir() {
-        return Err(std::io::Error::other(format!(
-            "claude directory not found at {}; install Claude Code first",
-            claude_dir.display()
-        )));
-    }
-    let settings_path = claude_dir.join("settings.json");
-    let mut settings: serde_json::Value = if settings_path.is_file() {
-        serde_json::from_str(&std::fs::read_to_string(&settings_path)?).map_err(|err| {
-            std::io::Error::other(format!("failed to parse {}: {err}", settings_path.display()))
-        })?
-    } else {
-        serde_json::json!({})
-    };
-
-    let exe = std::env::current_exe()?;
-    let command = format!("{} claude-hook session", exe.display());
-
-    let hooks = settings
-        .as_object_mut()
-        .ok_or_else(|| std::io::Error::other("settings.json is not an object"))?
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-    let session_start = hooks
-        .as_object_mut()
-        .ok_or_else(|| std::io::Error::other("settings.json hooks is not an object"))?
-        .entry("SessionStart")
-        .or_insert_with(|| serde_json::json!([]));
-    let entries = session_start
-        .as_array_mut()
-        .ok_or_else(|| std::io::Error::other("SessionStart hooks is not an array"))?;
-
-    // Drop previous shepherd entries (idempotent reinstall).
-    for entry in entries.iter_mut() {
-        if let Some(commands) = entry.get_mut("hooks").and_then(|hooks| hooks.as_array_mut()) {
-            commands.retain(|command_entry| {
-                !command_entry
-                    .get("command")
-                    .and_then(|command| command.as_str())
-                    .is_some_and(|command| command.contains("claude-hook session"))
-            });
-        }
-    }
-    entries.retain(|entry| {
-        entry
-            .get("hooks")
-            .and_then(|hooks| hooks.as_array())
-            .is_none_or(|commands| !commands.is_empty())
-    });
-
-    entries.push(serde_json::json!({
-        "matcher": "*",
-        "hooks": [{ "type": "command", "command": command, "timeout": 10 }],
-    }));
-
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
-
-    // The shep-meta skill rides along with the hook install.
-    let skill_dir = claude_dir.join("skills").join("shep-meta");
-    std::fs::create_dir_all(&skill_dir)?;
-    std::fs::write(skill_dir.join("SKILL.md"), SHEP_META_SKILL)?;
-
-    Ok(settings_path)
 }

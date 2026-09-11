@@ -34,8 +34,9 @@ open http://localhost:4650        # live web monitor
 shep status                   # one-shot table
 shep status --watch           # live table
 
-# Let Claude Code report its resumable session id (optional, once):
-shep install-claude-hook
+# Let an agent report its own state and resumable session id (optional, once):
+shep install claude
+shep install opencode
 ```
 
 The killer state is **blocked** — an agent waiting on your input. **done**
@@ -71,9 +72,31 @@ Every list of sessions is searchable: the web monitor has a filter box,
 `shep status <term>` filters the table and Raycast matches metadata in its
 search bar.
 
-Claude can tag its own session. `shep install-claude-hook` installs a
+Claude can tag its own session. `shep install claude` installs a
 `shep-meta` skill beside the session hook; say "tag this session with jira
 PROJ-123" and Claude runs `shep meta` itself.
+
+## Agent integrations
+
+Screen detection works for every supported agent without setup. Some agents can
+do better: with an integration installed they report their own state and a
+resumable session id, which is both more reliable and what makes durable session
+metadata and resuming possible.
+
+```sh
+shep install claude       # SessionStart hook + the shep-meta skill
+shep install opencode     # two plugins; registers the tui one in tui.jsonc
+```
+
+Installs are idempotent — re-run after upgrading shep to refresh the files.
+
+For opencode, if `~/.config/opencode/tui.jsonc` already has a `plugin` list,
+shep will not rewrite it; it prints the one line to add. State reporting works
+without that entry, which only sharpens which conversation is recorded when you
+switch between several in one opencode session.
+
+The opencode plugins are ported from
+[herdr](https://github.com/ogulcancelik/herdr) and keep its attribution.
 
 ## How it works
 

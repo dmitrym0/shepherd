@@ -1,4 +1,5 @@
 mod detect;
+mod install;
 mod osc;
 mod protocol;
 mod server;
@@ -47,13 +48,40 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Install the Claude Code SessionStart hook so Claude sessions report
-    /// their resumable session id.
+    /// Install an agent integration so sessions report their own state and
+    /// resumable session id, e.g. `shep install claude opencode`.
+    Install {
+        /// Agents to install: claude, opencode.
+        #[arg(required = true)]
+        agents: Vec<String>,
+    },
+    /// Deprecated alias for `shep install claude`.
+    #[command(hide = true)]
     InstallClaudeHook,
     /// Hook entry point invoked by Claude Code (installed by
     /// install-claude-hook).
     #[command(hide = true)]
     ClaudeHook { action: String },
+}
+
+/// Install each named agent, reporting every path written. One bad agent does
+/// not stop the others; the exit code reflects whether anything failed.
+fn install_agents(agents: &[String]) -> i32 {
+    let mut code = 0;
+    for agent in agents {
+        match install::install(agent) {
+            Ok(messages) => {
+                for message in messages {
+                    println!("{message}");
+                }
+            }
+            Err(err) => {
+                eprintln!("shepherd: {agent}: {err}");
+                code = 1;
+            }
+        }
+    }
+    code
 }
 
 fn main() {
@@ -90,17 +118,8 @@ fn main() {
                 1
             }
         },
-        Command::InstallClaudeHook => match status::install_claude_hook() {
-            Ok(path) => {
-                println!("installed SessionStart hook into {}", path.display());
-                println!("installed shep-meta skill into ~/.claude/skills/shep-meta/");
-                0
-            }
-            Err(err) => {
-                eprintln!("shepherd: {err}");
-                1
-            }
-        },
+        Command::Install { agents } => install_agents(&agents),
+        Command::InstallClaudeHook => install_agents(&["claude".to_string()]),
         // Hooks must never break the agent that invoked them: swallow all
         // errors and exit 0.
         Command::ClaudeHook { action } => {
