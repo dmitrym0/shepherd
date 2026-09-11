@@ -24,6 +24,10 @@ tell application id "com.googlecode.iterm2"
     repeat with t in tabs of w
       repeat with s in sessions of t
         if id of s is "$sid" then
+          -- Select the window first: selecting only the tab leaves it
+          -- current inside a window that may not be frontmost, and the
+          -- activate below then raises whichever window already was.
+          select w
           select t
           select s
           activate
