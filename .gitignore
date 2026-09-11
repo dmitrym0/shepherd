@@ -3,3 +3,8 @@ target/
 *.log
 .DS_Store
 specs/
+
+# Locally installed agent skills (machine tooling, not shepherd)
+.agents/
+.claude/skills/
+skills-lock.json
