@@ -138,7 +138,7 @@ fn tui_config_with_plugin(existing: &str, spec: &str) -> TuiEdit {
 /// tag its own session; the wrapper-injected SHEPHERD_AGENT_ID targets it.
 const SHEP_META_SKILL: &str = r#"---
 name: shep-meta
-description: Tag the current shepherd-supervised session with metadata. Use when the user asks to tag, label, or describe this session, link it to a ticket (jira), or set/remove session metadata.
+description: Tag the current shepherd-supervised session with metadata. Use when the user asks to tag, label, describe, or pin this session, link it to a ticket (jira), or set/remove session metadata.
 ---
 
 # shep-meta
@@ -148,6 +148,7 @@ Set metadata on the current supervised session:
     shep meta key=value ...
 
 - Well-known keys: `jira` (ticket key, e.g. PROJ-123), `description` (short summary), `url`.
+- "Pin this session" means `pinned=true`; unpinning means `pinned=` (empty value).
 - Quote values with spaces: `shep meta description="Fixing login timeout"`.
 - `key=` (empty value) removes a key; `shep meta` alone prints current metadata.
 - Do not pass an agent name — the environment identifies the session.
