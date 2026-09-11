@@ -29,6 +29,17 @@
   .done    .status { color: #46b7c6; }
   .unknown .status { color: #888; }
   .name { font-weight: 600; }
+  .badge {
+    display: inline-block; margin-left: .5rem; padding: 0 .4rem;
+    border: 1px solid currentColor; border-radius: .75rem;
+    font-size: .7rem; font-weight: 600; letter-spacing: .04em;
+    vertical-align: .08em; opacity: .9;
+  }
+  .badge.claude   { color: #d98b5f; }
+  .badge.opencode { color: #6fa8dc; }
+  .badge.codex    { color: #8fc7a8; }
+  .badge.gemini   { color: #b48fd9; }
+  .badge.other    { color: #7a869a; }
   .age { color: #7a869a; font-size: .85rem; }
   .detail { grid-column: 2 / 4; color: #9aa7b5; font-size: .9rem; }
   .description { grid-column: 2 / 4; color: #c7d1dc; font-size: .95rem; }
@@ -57,6 +68,8 @@
 <script>
 "use strict";
 const agents = new Map();
+// Agents with a dedicated badge colour; any other agent gets the neutral one.
+const BADGED_AGENTS = new Set(["claude", "opencode", "codex", "gemini"]);
 let connected = false;
 let jiraBase = null;
 
@@ -116,6 +129,13 @@ function render() {
     const name = document.createElement("span");
     name.className = "name";
     name.textContent = info.name || info.title || info.display_agent || info.agent || "agent";
+    const agentLabel = info.agent || info.display_agent;
+    if (agentLabel) {
+      const badge = document.createElement("span");
+      badge.className = "badge " + (BADGED_AGENTS.has(agentLabel) ? agentLabel : "other");
+      badge.textContent = agentLabel;
+      name.appendChild(badge);
+    }
     card.appendChild(name);
 
     const age = document.createElement("span");
@@ -171,7 +191,7 @@ function render() {
     if (info.cwd) {
       const cwd = document.createElement("div");
       cwd.className = "cwd";
-      cwd.textContent = (info.agent ? info.agent + " · " : "") + info.cwd;
+      cwd.textContent = info.cwd;
       card.appendChild(cwd);
     }
       root.appendChild(card);
