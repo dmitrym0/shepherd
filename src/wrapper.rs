@@ -53,6 +53,10 @@ struct IngestClient {
     /// during an outage are dropped by design.
     last_rename: Mutex<Option<Method>>,
     last_detection: Mutex<Option<Method>>,
+    /// The agent's resumable session id. Replayed like the others, which is
+    /// what makes identity survive a server restart: the fresh server learns
+    /// it again without the session having to do anything (git-bug 69681aa).
+    last_session: Mutex<Option<Method>>,
 }
 
 impl IngestClient {
@@ -64,6 +68,7 @@ impl IngestClient {
         match &method {
             Method::AgentRename(_) => cache(&self.last_rename, &method),
             Method::AgentReportDetection(_) => cache(&self.last_detection, &method),
+            Method::AgentReportSession(_) => cache(&self.last_session, &method),
             _ => {}
         }
         let request = Request { id: None, method };
@@ -80,7 +85,7 @@ impl IngestClient {
 
     /// Current state to re-send after a re-registration.
     fn replay_methods(&self) -> Vec<Method> {
-        [&self.last_rename, &self.last_detection]
+        [&self.last_rename, &self.last_detection, &self.last_session]
             .into_iter()
             .filter_map(|slot| {
                 slot.lock()
@@ -215,6 +220,7 @@ pub fn run(name: Option<String>, argv: Vec<String>) -> std::io::Result<i32> {
         register_params,
         last_rename: Mutex::new(None),
         last_detection: Mutex::new(None),
+        last_session: Mutex::new(None),
     });
 
     // Drain further responses so the server never blocks writing to us.
@@ -541,6 +547,7 @@ fn poll_claude_session_name(
         .join(format!("{child_pid}.json"));
     let mut last_mtime: Option<std::time::SystemTime> = None;
     let mut last_name: Option<String> = None;
+    let mut last_session_id: Option<String> = None;
     loop {
         std::thread::sleep(CLAUDE_SESSION_POLL);
         if stop.load(Ordering::Acquire) {
@@ -554,6 +561,26 @@ fn poll_claude_session_name(
             continue;
         }
         last_mtime = mtime;
+
+        // Identity is reported independently of the name: the two change at
+        // different times, and a session that never gets renamed still has
+        // an id worth reporting. Whatever the file currently says wins, so a
+        // session that started a new conversation reports the new id.
+        let session_id = claude_session_id(&path);
+        if session_id.is_some() && session_id != last_session_id {
+            last_session_id = session_id.clone();
+            client.notify(Method::AgentReportSession(
+                crate::protocol::AgentReportSessionParams {
+                    agent_id: agent_id.to_string(),
+                    source: "shepherd:claude".to_string(),
+                    agent: "claude".to_string(),
+                    seq: None,
+                    agent_session_id: session_id,
+                    agent_session_path: None,
+                },
+            ));
+        }
+
         let Some(name) = claude_session_name(&path) else {
             continue;
         };
@@ -570,6 +597,16 @@ fn poll_claude_session_name(
 
 /// Reads the `name` field (set by /rename) from Claude Code's session
 /// metadata file. Undocumented internal format — fail silent on any change.
+/// The agent's resumable session id, from the same file the rename poller
+/// reads. Attribution is structural: the file is keyed by the pid of the
+/// child this wrapper spawned, so it cannot describe another session.
+fn claude_session_id(path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let id = json.get("sessionId")?.as_str()?.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 fn claude_session_name(path: &std::path::Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -724,6 +761,7 @@ mod tests {
             },
             last_rename: Mutex::new(None),
             last_detection: Mutex::new(None),
+            last_session: Mutex::new(None),
         }
     }
 
@@ -834,6 +872,62 @@ mod tests {
         .expect("tmux should be detected");
         assert_eq!(location.app, "tmux");
         assert_eq!(location.session_id, "%5");
+    }
+
+    #[test]
+    fn replay_restores_session_identity_after_reconnect() {
+        let (ours, _theirs) = UnixStream::pair().expect("socket pair should be created");
+        let client = test_client(ours);
+        client.notify(Method::AgentReportSession(
+            crate::protocol::AgentReportSessionParams {
+                agent_id: "agent_1".to_string(),
+                source: "shepherd:claude".to_string(),
+                agent: "claude".to_string(),
+                seq: None,
+                agent_session_id: Some("ses-1".to_string()),
+                agent_session_path: None,
+            },
+        ));
+
+        // What a fresh server would be told on re-registration.
+        let replayed: Vec<_> = client
+            .replay_methods()
+            .into_iter()
+            .filter_map(|method| match method {
+                Method::AgentReportSession(params) => params.agent_session_id,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed, vec!["ses-1".to_string()]);
+    }
+
+    #[test]
+    fn claude_session_id_reads_session_field() {
+        let dir = std::env::temp_dir().join(format!("shep-claude-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        let path = dir.join("321.json");
+
+        // Missing file, malformed JSON and an absent/blank id all yield None
+        // rather than a guess.
+        assert_eq!(super::claude_session_id(&path), None);
+        std::fs::write(&path, "not json").expect("file should write");
+        assert_eq!(super::claude_session_id(&path), None);
+        std::fs::write(&path, r#"{"pid":321,"name":"x"}"#).expect("file should write");
+        assert_eq!(super::claude_session_id(&path), None);
+        std::fs::write(&path, r#"{"pid":321,"sessionId":"  "}"#).expect("file should write");
+        assert_eq!(super::claude_session_id(&path), None);
+
+        std::fs::write(
+            &path,
+            r#"{"pid":321,"sessionId":"96d80aea-399d-45e5-8ef1-55031762757b","name":"shep"}"#,
+        )
+        .expect("file should write");
+        assert_eq!(
+            super::claude_session_id(&path).as_deref(),
+            Some("96d80aea-399d-45e5-8ef1-55031762757b")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

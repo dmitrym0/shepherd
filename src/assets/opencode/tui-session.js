@@ -11,6 +11,12 @@ const SOURCE = "shepherd:opencode";
 const AGENT = "opencode";
 const ROUTE_POLL_INTERVAL_MS = 100;
 const SELECTION_RETRY_DELAYS_MS = [100, 400, 1_000];
+// After the ladder, keep re-reporting slowly forever. The server holds
+// identity in memory only, so a restart forgets it; nothing else would tell
+// this plugin that happened. Without the heartbeat an idle session stays
+// anonymous until the user touches it — which is exactly the session they
+// are most likely to be looking at (shepherd git-bug 69681aa).
+const SELECTION_HEARTBEAT_MS = 30_000;
 
 function requestOnce(sessionID) {
   const agentId = process.env.SHEPHERD_AGENT_ID;
@@ -104,7 +110,7 @@ export default {
       }
       const retryDelay = SELECTION_RETRY_DELAYS_MS[retryIndex];
       retryIndex += 1;
-      nextReportAt = retryDelay === undefined ? Number.POSITIVE_INFINITY : Date.now() + retryDelay;
+      nextReportAt = Date.now() + (retryDelay ?? SELECTION_HEARTBEAT_MS);
     };
 
     await syncSelectedSession();
