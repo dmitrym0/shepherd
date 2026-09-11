@@ -20,6 +20,7 @@ type Agent = {
   agent_status: string;
   blocked_reason?: string;
   cwd?: string;
+  activity?: string;
   metadata?: Record<string, string>;
   terminal?: { app: string; session_id: string };
 };
@@ -59,7 +60,7 @@ export default function Command() {
           <List.Item
             key={a.agent_id}
             title={a.name ?? a.agent ?? a.agent_id}
-            subtitle={a.metadata?.description ?? a.blocked_reason ?? a.cwd}
+            subtitle={a.blocked_reason ?? a.activity ?? a.metadata?.description ?? a.cwd}
             keywords={Object.entries(a.metadata ?? {}).flatMap(([k, v]) => [k, v, `${k}=${v}`])}
             accessories={[
               ...(a.metadata?.jira ? [{ text: a.metadata.jira }] : []),

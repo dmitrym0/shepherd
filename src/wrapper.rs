@@ -425,6 +425,7 @@ fn detection_loop(
     let mut last_visible_signal_refresh: Option<Instant> = None;
     let mut last_screen_scan_seq: Option<u64> = None;
     let mut pending_idle = PendingIdleConfirmation::default();
+    let mut last_activity: Option<String> = None;
 
     loop {
         let interval = if pending_idle.active() {
@@ -466,6 +467,20 @@ fn detection_loop(
             )
         };
         last_screen_scan_seq = current_seq;
+
+        // The agent's own line about its work. Published independently of the
+        // state decision below: a title can change many times within one state
+        // (working -> working), and state publishes are deliberately deduped.
+        let activity = activity_from_title(&osc_title);
+        if activity != last_activity {
+            last_activity = activity.clone();
+            client.notify(Method::AgentReportActivity(
+                crate::protocol::AgentReportActivityParams {
+                    agent_id: agent_id.to_string(),
+                    activity,
+                },
+            ));
+        }
 
         if crate::detect::should_skip_state_update(agent, &content) {
             pending_idle.clear();
@@ -736,8 +751,78 @@ impl Drop for RawModeGuard {
     }
 }
 
+
+/// Maximum characters carried for an agent's activity line; surfaces truncate
+/// further to fit.
+const MAX_ACTIVITY_CHARS: usize = 160;
+
+/// Leading decoration agents put before their title text: spinner frames
+/// (braille, half-circles) and idle/bullet markers. These say the same thing
+/// the status already says, so they are stripped rather than displayed.
+fn is_title_decoration(ch: char) -> bool {
+    matches!(ch,
+        '\u{2800}'..='\u{28FF}'   // braille spinner frames
+        | '\u{25D0}'..='\u{25D3}' // half-circle spinner frames
+        | '\u{2733}'              // ✳ idle marker
+        | '\u{2736}' | '\u{273B}' | '\u{273D}' | '\u{2722}'
+        | '\u{00B7}' | '\u{002A}' // · *
+        | '\u{23F5}' | '\u{23F8}' // ⏵ ⏸
+    )
+}
+
+/// Turn a raw OSC title into the line shown to the user, or None when it
+/// carries nothing meaningful. The OSC tracker has already stripped control
+/// characters; this removes leading decoration and caps the length.
+fn activity_from_title(title: &str) -> Option<String> {
+    let text = title
+        .trim_start_matches(|ch: char| is_title_decoration(ch) || ch.is_whitespace())
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(MAX_ACTIVITY_CHARS).collect())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{activity_from_title, MAX_ACTIVITY_CHARS};
+
+    #[test]
+    fn activity_strips_spinner_and_idle_decoration() {
+        assert_eq!(
+            activity_from_title("◐ refactoring the parser").as_deref(),
+            Some("refactoring the parser")
+        );
+        assert_eq!(
+            activity_from_title("⠧ thinking").as_deref(),
+            Some("thinking")
+        );
+        assert_eq!(
+            activity_from_title("✳ Fixed the login timeout").as_deref(),
+            Some("Fixed the login timeout")
+        );
+    }
+
+    #[test]
+    fn activity_is_none_when_nothing_meaningful_remains() {
+        assert_eq!(activity_from_title(""), None);
+        assert_eq!(activity_from_title("   "), None);
+        // Decoration only: the status already says this; showing it would be noise.
+        assert_eq!(activity_from_title("◐"), None);
+        assert_eq!(activity_from_title("✳  "), None);
+    }
+
+    #[test]
+    fn activity_keeps_ordinary_titles_and_caps_length() {
+        assert_eq!(
+            activity_from_title("shepherd — main").as_deref(),
+            Some("shepherd — main")
+        );
+        let long = activity_from_title(&format!("◐ {}", "x".repeat(500)))
+            .expect("a long title should still produce a line");
+        assert_eq!(long.chars().count(), MAX_ACTIVITY_CHARS);
+    }
+
     use super::detect_terminal_location;
     use super::{next_backoff, IngestClient, RECONNECT_CEILING, RECONNECT_INITIAL};
     use crate::protocol::Method;

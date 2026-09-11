@@ -273,9 +273,13 @@ fn render_table<'a>(agents: impl Iterator<Item = &'a AgentInfo>) -> String {
             .clone()
             .or_else(|| info.agent.clone())
             .unwrap_or_else(|| "?".to_string());
+        // FR-006 precedence for the single-line slot: the reason a session is
+        // blocked outranks everything, then the agent's own line, then a
+        // custom status (typically a stale mid-turn hint once idle).
         let note = info
             .blocked_reason
             .clone()
+            .or_else(|| info.activity.clone())
             .or_else(|| info.custom_status.clone())
             .unwrap_or_default();
         rows.push([
@@ -441,6 +445,7 @@ mod tests {
             agent_status: AgentStatus::Idle,
             custom_status: None,
             state_labels: HashMap::new(),
+            activity: None,
             metadata: pairs
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))

@@ -412,6 +412,13 @@ fn handle_request(
             })?;
             Ok(serde_json::json!({}))
         }
+        Method::AgentReportActivity(params) => {
+            let agent_id = params.agent_id.clone();
+            shared
+                .lock()
+                .update_agent(&agent_id, |entry| entry.set_activity(params.activity))?;
+            Ok(serde_json::json!({}))
+        }
         Method::AgentSetMetadata(params) => {
             shared
                 .lock()

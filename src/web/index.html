@@ -42,6 +42,11 @@
   .badge.other    { color: #7a869a; }
   .age { color: #7a869a; font-size: .85rem; }
   .detail { grid-column: 2 / 4; color: #9aa7b5; font-size: .9rem; }
+  /* The agent's own line. Italic while the turn runs so in-progress activity
+     is never mistaken for a finished result; upright once it settles. */
+  .activity { grid-column: 2 / 4; color: #9aa7b5; font-size: .9rem; }
+  .working .activity, .unknown .activity { font-style: italic; opacity: .85; }
+  .blocked .activity { opacity: .7; }
   .description { grid-column: 2 / 4; color: #c7d1dc; font-size: .95rem; }
   .meta { grid-column: 2 / 4; color: #7a869a; font-size: .8rem; }
   .meta a { color: #6fa8dc; text-decoration: none; }
@@ -173,6 +178,13 @@ function render() {
       }
     }
     if (chips.childNodes.length) card.appendChild(chips);
+
+    if (info.activity) {
+      const activity = document.createElement("div");
+      activity.className = "activity";
+      activity.textContent = info.activity;
+      card.appendChild(activity);
+    }
 
     const labels = Object.entries(info.state_labels || {}).map(([k, v]) => k + ": " + v);
     const detailText = [info.custom_status, ...labels].filter(Boolean).join(" · ");

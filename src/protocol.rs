@@ -79,6 +79,10 @@ pub enum Method {
     /// skill). An empty value removes the key.
     #[serde(rename = "agent.set_metadata")]
     AgentSetMetadata(AgentSetMetadataParams),
+    /// Wrapper reports the agent's own line about its work: in-progress
+    /// activity while working, its summary once the turn ends. Ephemeral.
+    #[serde(rename = "agent.report_activity")]
+    AgentReportActivity(AgentReportActivityParams),
     /// Snapshot of all agents (local clients, e.g. `shep status`).
     #[serde(rename = "agent.list")]
     AgentList(EmptyParams),
@@ -205,6 +209,14 @@ pub struct AgentReportMetadataParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentReportActivityParams {
+    pub agent_id: String,
+    /// None clears the line (the agent published nothing meaningful).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSetMetadataParams {
     pub agent_id: String,
     pub entries: HashMap<String, String>,
@@ -304,6 +316,11 @@ pub struct AgentInfo {
     /// User/agent-written session metadata (sibling of state_labels; durable).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
+    /// The agent's own line about its work. Read as in-progress activity
+    /// while working and as the end-of-turn summary once idle/done — the
+    /// phase comes from agent_status, not from a second field. Ephemeral.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,6 +402,21 @@ mod tests {
                 params.agent_id = None;
                 let json = serde_json::to_string(&params).expect("params should serialize");
                 assert!(!json.contains("agent_id"), "unexpected field in {json}");
+            }
+            other => panic!("unexpected method: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_activity_request_parses() {
+        let request: Request = serde_json::from_str(
+            r#"{"id":3,"method":"agent.report_activity","params":{"agent_id":"agent_1","activity":"refactoring the parser"}}"#,
+        )
+        .expect("request should parse");
+        match request.method {
+            Method::AgentReportActivity(params) => {
+                assert_eq!(params.agent_id, "agent_1");
+                assert_eq!(params.activity.as_deref(), Some("refactoring the parser"));
             }
             other => panic!("unexpected method: {other:?}"),
         }

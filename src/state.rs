@@ -109,6 +109,8 @@ pub struct AgentEntry {
     hook_authority: Option<HookAuthority>,
     metadata: HashMap<String, MetadataEntry>,
     user_metadata: SessionMetadata,
+    /// The agent's own line about its work; ephemeral, never persisted.
+    activity: Option<String>,
     persisted_session: Option<PersistedSession>,
     hook_report_sequences: HashMap<String, u64>,
     session_report_sequences: HashMap<String, u64>,
@@ -150,6 +152,7 @@ impl AgentEntry {
             hook_authority: None,
             metadata: HashMap::new(),
             user_metadata: SessionMetadata::new(),
+            activity: None,
             persisted_session: None,
             hook_report_sequences: HashMap::new(),
             session_report_sequences: HashMap::new(),
@@ -388,6 +391,13 @@ impl AgentEntry {
 
     pub fn mark_seen(&mut self) {
         self.seen = true;
+    }
+
+    /// The agent's line about its own work. Whether it reads as in-progress
+    /// activity or as an end-of-turn summary is decided at display time by
+    /// the session's status, so nothing here needs to know the difference.
+    pub fn set_activity(&mut self, activity: Option<String>) {
+        self.activity = activity.filter(|line| !line.trim().is_empty());
     }
 
     /// Apply a `shep meta` write: validate everything first (all-or-nothing),
@@ -639,6 +649,7 @@ impl AgentEntry {
                 .iter()
                 .map(|(key, value)| (key.clone(), value.value.clone()))
                 .collect(),
+            activity: self.activity.clone(),
             agent_session: self.effective_session(),
             blocked_reason: self.blocked_reason(),
             cwd: Some(self.cwd.clone()),
