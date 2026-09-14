@@ -97,6 +97,73 @@ echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "not a version: $VE
 TAG="v$VERSION"
 TARBALL_URL="https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz"
 
+# --- changelog ---------------------------------------------------------------
+CHANGELOG=CHANGELOG.md
+
+# Render one entry. Tickets carry the why and a lookup handle; commits catch
+# work no ticket covered. A commit that belongs to a listed ticket says so
+# ("Refs git-bug <id>"), so dedup is exact rather than guessed from prose.
+changelog_entry() {
+  local version="$1" prev="$2" upto="$3" date
+  date=$(git log -1 --format=%cs "$upto" 2>/dev/null || date +%F)
+
+  local features="" fixes="" id labels title
+  if [ -n "$TICKET_LINES" ]; then
+    while IFS=$'\t' read -r id labels title; do
+      [ -n "$id" ] || continue
+      if printf '%s' "$labels" | tr ',' '\n' | grep -qx feature; then
+        features="${features}- ${title} (${id})"$'\n'
+      else
+        fixes="${fixes}- ${title} (${id})"$'\n'
+      fi
+    done <<< "$TICKET_LINES"
+  fi
+
+  # Everything else that landed. Merges and the bump commit carry nothing for
+  # a reader; commits referencing a listed ticket are already described above.
+  local range other="" sha subject
+  range=$([ -n "$prev" ] && echo "$prev..$upto" || echo "$upto")
+  while IFS=$'\t' read -r sha subject; do
+    [ -n "$sha" ] || continue
+    # Bookkeeping that means nothing to a reader of a changelog.
+    case "$subject" in
+      "Bump version to "*|"Point speckit at "*) continue ;;
+    esac
+    if [ -n "$TICKET_LINES" ] \
+      && git show -s --format=%B "$sha" | grep -qE "git-bug ($(printf '%s' "$TICKET_LINES" | cut -f1 | paste -sd'|' -))"; then
+      continue
+    fi
+    other="${other}- ${subject}"$'\n'
+  done < <(git log --no-merges --format='%H%x09%s' "$range" 2>/dev/null)
+
+  printf '## %s — %s\n' "$version" "$date"
+  if [ -n "$features" ]; then printf '\n### Added\n\n%s' "$features"; fi
+  if [ -n "$fixes$other" ]; then printf '\n### Fixed and changed\n\n%s%s' "$fixes" "$other"; fi
+  if [ -z "$features$fixes$other" ]; then
+    printf '\n_No tracked work recorded for this release — describe it here._\n'
+  fi
+}
+
+# Prepend an entry, leaving everything already written untouched. Skipped when
+# the version already has a section, so a resumed release cannot duplicate it.
+write_changelog() {
+  local version="$1" entry
+  if [ -f "$CHANGELOG" ] && grep -q "^## $version " "$CHANGELOG"; then
+    step "changelog already has $version"
+    return
+  fi
+  entry=$(changelog_entry "$version" "$LAST_TAG" HEAD)
+  step "write changelog entry for $version"
+  {
+    printf '# Changelog\n\n'
+    printf '%s\n' "$entry"
+    if [ -f "$CHANGELOG" ]; then
+      tail -n +2 "$CHANGELOG" | sed '1{/^$/d;}'
+    fi
+  } > "$CHANGELOG.tmp"
+  mv "$CHANGELOG.tmp" "$CHANGELOG"
+}
+
 # --- show the plan, confirm --------------------------------------------------
 echo "release $LAST_TAG -> $TAG"
 if [ -n "$TICKET_LINES" ]; then
@@ -109,6 +176,10 @@ else
 fi
 echo "steps: bump Cargo.toml, commit, tag $TAG, push, update $TAP_REPO/$FORMULA_PATH, comment tickets"
 if [ "$DRY" = 1 ]; then
+  echo
+  echo "changelog entry that would be written:"
+  changelog_entry "$TAG" "$LAST_TAG" HEAD | sed 's/^/  /'
+  echo
   echo "dry run: no changes made"
   exit 0
 fi
@@ -127,9 +198,11 @@ else
   cargo build --quiet   # refresh Cargo.lock
 fi
 
+write_changelog "$TAG"
+
 if [ -n "$(git status --porcelain)" ]; then
   step "commit version bump"
-  git add Cargo.toml Cargo.lock
+  git add Cargo.toml Cargo.lock "$CHANGELOG"
   git commit -q -m "Bump version to $VERSION"
 else
   step "bump already committed"
@@ -147,6 +220,16 @@ if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
 else
   step "push main and $TAG"
   git push -q origin main "$TAG"
+fi
+
+if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+  step "github release $TAG already published"
+else
+  step "publish github release"
+  if ! changelog_entry "$TAG" "$LAST_TAG" "$TAG" \
+    | gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file - > /dev/null; then
+    echo "  WARNING: could not publish the github release; CHANGELOG.md is authoritative" >&2
+  fi
 fi
 
 step "compute tarball sha256"

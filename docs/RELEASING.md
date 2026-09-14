@@ -26,6 +26,18 @@ version-bearing lines of `Formula/shep.rb` in dmitrym0/homebrew-tap via the
 GitHub API, verify the published checksum, and comment `released in vX.Y.Z` on
 every shipped ticket.
 
+It also writes a `CHANGELOG.md` entry for the version — the tickets it shipped,
+grouped into added versus fixed, plus any commits since the last tag that no
+ticket covered — stages it with the version bump, and publishes the same text as
+a GitHub release on the tag. `just release --dry-run` prints the entry it would
+write.
+
+Entries are only ever prepended, so anything you edit by hand stays as you left
+it; re-running an interrupted release never writes a second entry for the same
+version. If a release has no tracked work, its entry says so and is yours to fill
+in. Publishing to GitHub is best-effort: a failure is reported and `CHANGELOG.md`
+remains authoritative.
+
 Each step is probed before it runs, so a failed release resumes by re-running
 the same command. It refuses to run on a dirty tree or off main — no overrides;
 fix the cause.
