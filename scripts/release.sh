@@ -65,7 +65,11 @@ if [ -n "$TICKET_LINES" ]; then
   UNSHIPPED=""
   while IFS= read -r line; do
     id=${line%%	*}
-    if git-bug bug show "$id" 2>/dev/null | grep -q "released in v"; then
+    # Match the release comment exactly — a line that is only "released in
+    # vX.Y.Z". A loose substring also matches prose that merely mentions the
+    # phrase, which silently excluded a ticket that had not shipped.
+    if git-bug bug show "$id" 2>/dev/null \
+      | grep -qE '^[[:space:]]*released in v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
       continue
     fi
     UNSHIPPED="${UNSHIPPED}${UNSHIPPED:+$'\n'}${line}"
