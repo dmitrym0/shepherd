@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.5.0 — 2026-09-14
+
+### Added
+
+- Releases should produce a changelog (fcbb37b)
+
+### Fixed and changed
+
+- Match the release annotation exactly, not as a substring
 ## v0.4.0 — 2026-09-14
 
 ### Added
