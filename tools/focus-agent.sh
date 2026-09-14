@@ -18,26 +18,39 @@ target="$1"
 
 focus_iterm() {
   local sid="$1" found
+  # Two passes, and every selection goes through an absolute `window id`.
+  # Walking `windows` yields references by POSITION, so a tab reference is
+  # really "tab N of window M". Selecting a window or activating the app can
+  # reorder windows, after which those references resolve to the same index
+  # in a different window — the right tab number in the wrong window. Pass
+  # one resolves the window id; pass two selects through it, which no
+  # reordering can invalidate.
   found=$(osascript <<EOF
 tell application id "com.googlecode.iterm2"
+  set wid to missing value
   repeat with w in windows
     repeat with t in tabs of w
       repeat with s in sessions of t
-        if id of s is "$sid" then
-          -- Select the window first: selecting only the tab leaves it
-          -- current inside a window that may not be frontmost, and the
-          -- activate below then raises whichever window already was.
-          select w
-          select t
-          select s
-          activate
-          return "found"
-        end if
+        if id of s is "$sid" then set wid to id of w
       end repeat
     end repeat
   end repeat
+  if wid is missing value then return "gone"
+
+  activate
+  tell window id wid
+    select
+    repeat with t in tabs
+      repeat with s in sessions of t
+        if id of s is "$sid" then
+          select t
+          select s
+        end if
+      end repeat
+    end repeat
+  end tell
+  return "found"
 end tell
-return "gone"
 EOF
   ) || die "osascript failed — check System Settings > Privacy & Security > Automation"
   [[ "$found" == "found" ]] || die "iTerm2 session $sid no longer exists"
